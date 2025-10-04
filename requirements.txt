@@ -1,0 +1,5 @@
+PyQt6==6.6.1
+mysql-connector-python==8.2.0
+GitPython==3.1.40
+psutil==5.9.6
+pyyaml==6.0.1
