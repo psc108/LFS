@@ -1,0 +1,64 @@
+# Core dependencies
+PyQt5>=5.15.0
+mysql-connector-python>=8.0.0
+GitPython>=3.1.0
+PyYAML>=6.0
+requests>=2.28.0
+psutil>=5.9.0
+
+# New advanced features
+flask>=2.3.0
+flask-cors>=4.0.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+paramiko>=3.2.0
+cryptography>=41.0.0
+pyjwt>=2.8.0
+schedule>=1.2.0
+docker>=6.1.0
+kubernetes>=27.2.0
+prometheus-client>=0.17.0
+grafana-api>=1.0.3
+celery>=5.3.0
+redis>=4.6.0
+elasticsearch>=8.9.0
+sqlalchemy>=2.0.0
+alembic>=1.11.0
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.7.0
+flake8>=6.0.0
+mypy>=1.5.0
+sphinx>=7.1.0
+mkdocs>=1.5.0
+
+# Container and orchestration
+docker-compose>=1.29.0
+ansible>=8.2.0
+
+# Security and compliance
+bandit>=1.7.0
+safety>=2.3.0
+semgrep>=1.34.0
+
+# Monitoring and observability
+opentelemetry-api>=1.19.0
+opentelemetry-sdk>=1.19.0
+jaeger-client>=4.8.0
+
+# Cloud integrations
+boto3>=1.28.0  # AWS
+azure-storage-blob>=12.17.0  # Azure
+google-cloud-storage>=2.10.0  # GCP
+
+# Build optimization
+ccache>=4.8.0
+distcc>=3.4.0
+ninja>=1.11.0
+
+# Documentation and reporting
+jinja2>=3.1.0
+weasyprint>=59.0.0
+reportlab>=4.0.0

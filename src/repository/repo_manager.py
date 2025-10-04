@@ -65,6 +65,13 @@ This repository contains build configurations, scripts, and patches for Linux Fr
     def create_branch(self, branch_name: str, from_branch: str = None, checkout: bool = True) -> bool:
         """Enhanced branch creation with flexible source"""
         try:
+            # Check if branch already exists
+            if branch_name in [b.name for b in self.git_repo.branches]:
+                print(f"Branch {branch_name} already exists")
+                if checkout:
+                    return self.switch_branch(branch_name)
+                return True
+            
             if from_branch:
                 # Create from specific branch/commit
                 new_branch = self.git_repo.create_head(branch_name, from_branch)
@@ -82,7 +89,17 @@ This repository contains build configurations, scripts, and patches for Linux Fr
     
     def switch_branch(self, branch_name: str) -> bool:
         try:
-            self.git_repo.git.checkout(branch_name)
+            # Handle branches with slashes (like build/xxx)
+            if '/' in branch_name:
+                # Check if it's a local branch first
+                local_branches = [b.name for b in self.git_repo.branches]
+                if branch_name in local_branches:
+                    self.git_repo.git.checkout(branch_name)
+                else:
+                    # Try to checkout as new local branch from remote
+                    self.git_repo.git.checkout('-b', branch_name, f'origin/{branch_name}')
+            else:
+                self.git_repo.git.checkout(branch_name)
             return True
         except Exception as e:
             print(f"Error switching branch: {e}")
@@ -865,3 +882,21 @@ This repository contains build configurations, scripts, and patches for Linux Fr
         except Exception as e:
             print(f"Error listing remotes: {e}")
             return []
+    
+    def get_current_branch(self) -> str:
+        """Get current branch name"""
+        try:
+            return self.git_repo.active_branch.name
+        except Exception as e:
+            print(f"Error getting current branch: {e}")
+            return "main"
+    
+    def stage_all_changes(self) -> bool:
+        """Stage all changes (modified, new, deleted files)"""
+        try:
+            # Add all files (including new ones)
+            self.git_repo.git.add('-A')
+            return True
+        except Exception as e:
+            print(f"Error staging all changes: {e}")
+            return False

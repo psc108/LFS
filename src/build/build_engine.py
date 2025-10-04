@@ -12,6 +12,7 @@ import tempfile
 
 from ..database.db_manager import DatabaseManager
 from .downloader import LFSDownloader
+from ..analysis.integrated_analyzer import IntegratedFaultAnalyzer
 
 class BuildStage:
     def __init__(self, name: str, order: int, command: str, 
@@ -30,6 +31,7 @@ class BuildEngine:
         self.db = db_manager
         self.repo = repo_manager
         self.downloader = LFSDownloader(repo_manager, db_manager) if repo_manager else None
+        self.fault_analyzer = IntegratedFaultAnalyzer(db_manager, self)
         self.stages = {}
         self.build_queue = queue.Queue()
         self.current_build = None
@@ -165,6 +167,9 @@ class BuildEngine:
         if not self.db.create_build(build_id, config_hash, total_stages):
             raise Exception("Failed to create build record")
         
+        # Create dedicated Git branch for this build
+        build_branch = self._create_build_branch(build_id)
+        
         self.db.add_document(
             build_id, 'config', 'Build Configuration', 
             config_content, {'config_path': config_path}
@@ -174,7 +179,8 @@ class BuildEngine:
             'id': build_id,
             'config_hash': config_hash,
             'stages': dict(self.stages),
-            'completed_stages': 0
+            'completed_stages': 0,
+            'branch': build_branch
         }
         
         if self.build_thread and self.build_thread.is_alive():
@@ -190,6 +196,9 @@ class BuildEngine:
         try:
             if not self.current_build:
                 return
+            
+            # Commit initial build state to branch
+            self._commit_build_start(build_id)
             
             # Setup LFS permissions before starting build
             self._setup_lfs_permissions(build_id)
@@ -210,12 +219,18 @@ class BuildEngine:
                 if stage.status == 'failed' or self.build_cancelled:
                     status = 'cancelled' if self.build_cancelled else 'failed'
                     self.db.update_build_status(build_id, status, self.current_build.get('completed_stages', 0))
+                    # Commit failed/cancelled build state
+                    self._commit_build_completion(build_id, status)
                     self.emit_event('build_error', {'build_id': build_id, 'stage': stage.name})
                     return
                 
                 self.current_build['completed_stages'] = self.current_build.get('completed_stages', 0) + 1
+                # Commit stage completion to build branch
+                self._commit_stage_completion(build_id, stage)
             
             self.db.update_build_status(build_id, 'success', self.current_build.get('completed_stages', 0))
+            # Commit successful build completion
+            self._commit_build_completion(build_id, 'success')
             self.emit_event('build_complete', {'build_id': build_id, 'status': 'success'})
             
         except Exception as e:
@@ -226,6 +241,9 @@ class BuildEngine:
                     build_id, 'error', 'Build Exception', 
                     str(e), {'exception_type': type(e).__name__}
                 )
+                # Commit failed build state
+                if self.current_build:
+                    self._commit_build_completion(build_id, 'failed')
                 self.emit_event('build_error', {'build_id': build_id, 'error': str(e)})
             except Exception as db_error:
                 print(f"Database error during exception handling: {db_error}")
@@ -390,6 +408,16 @@ class BuildEngine:
                 if stderr.strip():
                     print(f"Error details: {stderr.strip()[:200]}...")  # Show first 200 chars
                 self.db.add_stage_log(build_id, stage.name, 'failed', stdout)
+                
+                # Perform fault analysis on failure
+                try:
+                    analysis_result = self.fault_analyzer.analyze_build_failure(build_id, stderr + "\n" + stdout)
+                    if 'auto_fixes' in analysis_result and analysis_result['auto_fixes']:
+                        print(f"🔧 Auto-fix suggestions available for {stage.name}")
+                        for fix in analysis_result['auto_fixes']:
+                            print(f"   Suggested fix: {fix}")
+                except Exception as e:
+                    print(f"Fault analysis error: {e}")
                 
                 self.db.add_document(
                     build_id, 'error', f'Stage Failed: {stage.name}', 
@@ -562,3 +590,91 @@ class BuildEngine:
                 build_id, 'error', 'LFS Permissions Setup Failed',
                 str(e), {'setup': True}
             )
+    
+    def _create_build_branch(self, build_id: str) -> str:
+        """Create a dedicated Git branch for this build"""
+        if not self.repo:
+            return None
+        
+        try:
+            branch_name = f"build/{build_id}"
+            
+            # Create and switch to new branch
+            if self.repo.create_branch(branch_name):
+                self.repo.switch_branch(branch_name)
+                return branch_name
+            else:
+                # If branch creation fails, use current branch
+                return self.repo.get_current_branch()
+        except Exception as e:
+            print(f"Failed to create build branch: {e}")
+            return None
+    
+    def _commit_build_start(self, build_id: str):
+        """Commit initial build state to the build branch"""
+        if not self.repo or not self.current_build.get('branch'):
+            return
+        
+        try:
+            # Stage any changes
+            self.repo.stage_all_changes()
+            
+            # Commit build start
+            commit_msg = f"Start build {build_id}\n\nBuild configuration loaded with {len(self.stages)} stages"
+            self.repo.commit_changes(commit_msg)
+            
+        except Exception as e:
+            print(f"Failed to commit build start: {e}")
+    
+    def _commit_stage_completion(self, build_id: str, stage: BuildStage):
+        """Commit stage completion to the build branch"""
+        if not self.repo or not self.current_build.get('branch'):
+            return
+        
+        try:
+            # Stage any changes
+            self.repo.stage_all_changes()
+            
+            # Commit stage completion
+            status_emoji = "✅" if stage.status == 'success' else "❌"
+            commit_msg = f"{status_emoji} Stage {stage.order}: {stage.name} - {stage.status}\n\nBuild: {build_id}\nStage: {stage.name}\nStatus: {stage.status}"
+            
+            if stage.status == 'success':
+                commit_msg += f"\nCompleted stage {stage.order} of {len(self.stages)}"
+            else:
+                commit_msg += f"\nFailed at stage {stage.order} of {len(self.stages)}"
+            
+            self.repo.commit_changes(commit_msg)
+            
+        except Exception as e:
+            print(f"Failed to commit stage completion: {e}")
+    
+    def _commit_build_completion(self, build_id: str, status: str):
+        """Commit final build state to the build branch"""
+        if not self.repo or not self.current_build.get('branch'):
+            return
+        
+        try:
+            # Stage any changes
+            self.repo.stage_all_changes()
+            
+            # Commit build completion
+            status_emoji = {"success": "🎉", "failed": "💥", "cancelled": "🛑"}.get(status, "❓")
+            completed_stages = self.current_build.get('completed_stages', 0)
+            total_stages = len(self.stages)
+            
+            commit_msg = f"{status_emoji} Build {build_id} - {status.upper()}\n\n"
+            commit_msg += f"Completed {completed_stages} of {total_stages} stages\n"
+            commit_msg += f"Final status: {status}\n"
+            commit_msg += f"Build branch: {self.current_build.get('branch')}"
+            
+            self.repo.commit_changes(commit_msg)
+            
+            # Tag successful builds
+            if status == 'success':
+                tag_name = f"build-{build_id}-success"
+                tag_msg = f"Successful LFS build {build_id}\nCompleted all {total_stages} stages"
+                self.repo.create_tag(tag_name, tag_msg)
+            
+        except Exception as e:
+            print(f"Failed to commit build completion: {e}")

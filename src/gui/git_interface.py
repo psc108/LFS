@@ -367,6 +367,7 @@ class GitTagWidget(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.templates_file = os.path.expanduser("~/.lfs_build_system/tag_templates.json")
         self.setup_ui()
     
     def setup_ui(self):
@@ -382,12 +383,20 @@ class GitTagWidget(QWidget):
         
         create_btn = QPushButton("Create Tag")
         create_btn.clicked.connect(self.create_tag)
+        button_layout.addWidget(create_btn)
+        
+        template_btn = QPushButton("From Template")
+        template_btn.clicked.connect(self.create_from_template)
+        button_layout.addWidget(template_btn)
+        
+        manage_templates_btn = QPushButton("Manage Templates")
+        manage_templates_btn.clicked.connect(self.manage_templates)
+        button_layout.addWidget(manage_templates_btn)
         
         delete_btn = QPushButton("Delete Tag")
         delete_btn.clicked.connect(self.delete_tag)
-        
-        button_layout.addWidget(create_btn)
         button_layout.addWidget(delete_btn)
+        
         layout.addLayout(button_layout)
     
     def update_tags(self, tags: List[Dict]):
@@ -415,6 +424,52 @@ class GitTagWidget(QWidget):
                                        QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
                 self.tag_deleted.emit(tag_name)
+    
+    def create_from_template(self):
+        """Create tag from template"""
+        from .tag_templates_dialog import CreateTagFromTemplateDialog
+        
+        # Load templates
+        templates = self.load_templates()
+        if not templates:
+            QMessageBox.information(self, "No Templates", "No tag templates found. Create templates first using 'Manage Templates'.")
+            return
+        
+        # Get repo manager from parent
+        repo_manager = self.get_repo_manager()
+        if not repo_manager:
+            QMessageBox.warning(self, "Error", "Cannot access repository manager")
+            return
+        
+        dialog = CreateTagFromTemplateDialog(templates, repo_manager, self)
+        dialog.exec_()
+    
+    def manage_templates(self):
+        """Manage tag templates"""
+        from .tag_templates_dialog import TagTemplateDialog
+        
+        dialog = TagTemplateDialog(self.templates_file, self)
+        dialog.exec_()
+    
+    def load_templates(self):
+        """Load tag templates"""
+        if os.path.exists(self.templates_file):
+            try:
+                import json
+                with open(self.templates_file, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+        return {}
+    
+    def get_repo_manager(self):
+        """Get repository manager from parent"""
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, 'repo_manager'):
+                return parent.repo_manager
+            parent = parent.parent()
+        return None
 
 class GitMainInterface(QWidget):
     """Main Git interface combining all components"""
