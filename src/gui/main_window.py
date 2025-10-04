@@ -17,6 +17,13 @@ from ..repository.repo_manager import RepositoryManager
 from ..config.settings_manager import SettingsManager
 from .build_details_dialog import BuildDetailsDialog
 from .kernel_config_dialog import KernelConfigDialog
+from .sudo_dialog import SudoPasswordDialog
+from .git_interface import GitMainInterface
+from ..analysis.fault_analyzer import FaultAnalyzer
+from .advanced_analysis_methods import (
+    format_performance_results, format_predictive_analysis_results,
+    format_root_cause_analysis_results, generate_health_report, predict_next_build
+)
 
 class BuildMonitorThread(QThread):
     build_updated = pyqtSignal(dict)
@@ -27,24 +34,94 @@ class BuildMonitorThread(QThread):
         self.db = db_manager
         self.current_build_id = None
         self.running = False
+        self.update_interval = 1500  # 1.5 seconds for more responsive live updates
     
     def set_build_id(self, build_id: str):
         self.current_build_id = build_id
     
     def run(self):
         self.running = True
+        consecutive_errors = 0
+        
         while self.running and self.current_build_id:
             try:
-                build_details = self.db.get_build_details(self.current_build_id)
+                # Use a fresh connection for each query to avoid cursor issues
+                build_details = self.get_build_details_safe(self.current_build_id)
                 if build_details:
                     self.build_updated.emit(build_details)
-                self.msleep(1000)  # Update every second
+                    consecutive_errors = 0  # Reset error counter on success
+                else:
+                    # Build might be completed or not found
+                    consecutive_errors += 1
+                    if consecutive_errors > 5:
+                        print(f"Build {self.current_build_id} not found after 5 attempts, stopping monitor")
+                        break
+                
+                self.msleep(self.update_interval)
+                
             except Exception as e:
-                print(f"Monitor error: {e}")
-                self.msleep(5000)
+                consecutive_errors += 1
+                print(f"Monitor error (attempt {consecutive_errors}): {e}")
+                
+                # If too many consecutive errors, stop monitoring
+                if consecutive_errors > 10:
+                    print("Too many monitor errors, stopping thread")
+                    break
+                    
+                # Exponential backoff on errors
+                error_delay = min(10000, 1000 * consecutive_errors)
+                self.msleep(error_delay)
+    
+    def get_build_details_safe(self, build_id: str):
+        """Safely get build details with proper connection handling"""
+        try:
+            # Create a fresh connection for this query
+            conn = self.db.connect()
+            if not conn:
+                return None
+                
+            cursor = conn.cursor(dictionary=True)
+            
+            # Get build info
+            cursor.execute("SELECT * FROM builds WHERE build_id = %s", (build_id,))
+            build = cursor.fetchone()
+            
+            if not build:
+                cursor.close()
+                conn.close()
+                return None
+            
+            # Get stages
+            cursor.execute("SELECT * FROM build_stages WHERE build_id = %s ORDER BY stage_order", (build_id,))
+            stages = cursor.fetchall()
+            
+            # Get recent documents (limit to avoid memory issues)
+            cursor.execute("""
+                SELECT * FROM build_documents 
+                WHERE build_id = %s 
+                ORDER BY created_at DESC 
+                LIMIT 50
+            """, (build_id,))
+            documents = cursor.fetchall()
+            
+            cursor.close()
+            conn.close()
+            
+            return {
+                'build': build,
+                'stages': stages or [],
+                'documents': documents or []
+            }
+            
+        except Exception as e:
+            print(f"Error in get_build_details_safe: {e}")
+            return None
     
     def stop(self):
         self.running = False
+        # Wait for thread to finish gracefully
+        if self.isRunning():
+            self.wait(3000)  # Wait up to 3 seconds
 
 class DownloadThread(QThread):
     progress = pyqtSignal(int, int, str)  # current, total, package_name
@@ -949,12 +1026,22 @@ class LFSMainWindow(QMainWindow):
         self.db = DatabaseManager()
         self.repo_manager = RepositoryManager(self.db)
         self.build_engine = BuildEngine(self.db, self.repo_manager)
+        self.fault_analyzer = FaultAnalyzer(self.db)
+        import os
+        
+        # Bind advanced analysis methods
+        self._format_performance_results = lambda x: format_performance_results(self, x)
+        self._format_predictive_analysis_results = lambda: format_predictive_analysis_results(self)
+        self._format_root_cause_analysis_results = lambda: format_root_cause_analysis_results(self)
+        self.generate_health_report = lambda: generate_health_report(self)
+        self.predict_next_build = lambda: predict_next_build(self)
         
         # Setup callbacks
         self.build_engine.register_callback('stage_start', self.on_stage_start)
         self.build_engine.register_callback('stage_complete', self.on_stage_complete)
         self.build_engine.register_callback('build_complete', self.on_build_complete)
         self.build_engine.register_callback('build_error', self.on_build_error)
+        self.build_engine.register_callback('sudo_required', self.on_sudo_required)
         
         # Connect downloader signals for live repository updates
         self.build_engine.downloader.package_cached.connect(self.on_package_cached)
@@ -963,15 +1050,81 @@ class LFSMainWindow(QMainWindow):
         self.monitor_thread = BuildMonitorThread(self.db)
         self.monitor_thread.build_updated.connect(self.update_build_display)
         
+        # Auto-refresh documents periodically
+        self.doc_refresh_timer = QTimer()
+        self.doc_refresh_timer.timeout.connect(self.refresh_current_build_documents)
+        self.doc_refresh_timer.start(3000)  # Refresh every 3 seconds for more responsive updates
+        
+        # Live logs refresh timer
+        self.logs_refresh_timer = QTimer()
+        self.logs_refresh_timer.timeout.connect(self.refresh_logs_manually)
+        self.logs_refresh_timer.start(2000)  # Refresh logs every 2 seconds
+        
+        # System status refresh timer
+        self.status_refresh_timer = QTimer()
+        self.status_refresh_timer.timeout.connect(self.refresh_system_status)
+        self.status_refresh_timer.start(5000)  # Refresh system status every 5 seconds
+        
         self.current_build_id = None
+        
+        # Pagination state
+        self.current_page = 1
+        self.page_size = 50
+        self.total_documents = 0
+        self.total_pages = 1
+        self.browse_mode = False  # True when browsing all documents
         
         self.setup_ui()
         self.load_build_history()
         self.update_document_stats()
         self.load_all_documents()
         
+        # Load documents for the most recent build
+        builds = self.db.search_builds(limit=1)
+        if builds:
+            self.current_build_id = builds[0]['build_id']
+            self.display_build_details(self.current_build_id)
+        
+        # Setup LFS permissions on startup
+        self.setup_lfs_permissions()
+        
+        # Initial system status refresh
+        self.refresh_system_status()
+        
         # Add status bar
         self.statusBar().showMessage("Ready")
+    
+    def setup_lfs_permissions(self):
+        """Setup LFS directory permissions on startup"""
+        try:
+            import subprocess
+            import os
+            
+            # Check if LFS directory exists and needs setup
+            lfs_dir = "/mnt/lfs"
+            sources_dir = "/mnt/lfs/sources"
+            
+            if not os.path.exists(lfs_dir):
+                self.statusBar().showMessage("LFS directory not found - please run setup first", 5000)
+                return
+            
+            if not os.path.exists(sources_dir):
+                self.statusBar().showMessage("Creating LFS sources directory...", 3000)
+                subprocess.run(['sudo', 'mkdir', '-p', sources_dir], check=True)
+            
+            # Check if sources directory is writable
+            if not os.access(sources_dir, os.W_OK):
+                self.statusBar().showMessage("Setting up LFS permissions...", 3000)
+                # Make sources directory writable for package copying
+                subprocess.run(['sudo', 'chmod', '777', sources_dir], check=True)
+                self.statusBar().showMessage("✓ LFS permissions configured", 3000)
+            
+        except subprocess.CalledProcessError:
+            # Permissions setup failed - show helpful message
+            self.statusBar().showMessage("⚠ LFS permissions setup needed - see installation guide", 8000)
+        except Exception as e:
+            print(f"LFS setup error: {e}")
+            self.statusBar().showMessage("⚠ LFS setup check failed", 5000)
     
     def setup_ui(self):
         central_widget = QWidget()
@@ -1018,6 +1171,9 @@ class LFSMainWindow(QMainWindow):
         self.cleanup_action.triggered.connect(self.cleanup_builds)
         
         self.build_menu.addSeparator()
+        
+        self.lfs_setup_action = self.build_menu.addAction("Setup LFS Permissions")
+        self.lfs_setup_action.triggered.connect(self.setup_lfs_permissions_interactive)
         
         self.kernel_config_action = self.build_menu.addAction("Kernel Configuration")
         self.kernel_config_action.triggered.connect(self.open_kernel_config)
@@ -1102,6 +1258,22 @@ class LFSMainWindow(QMainWindow):
         logs_tab = QWidget()
         logs_layout = QVBoxLayout(logs_tab)
         
+        # Logs header with refresh button
+        logs_header = QHBoxLayout()
+        logs_header.addWidget(QLabel("Live Build Logs:"))
+        logs_header.addStretch()
+        
+        self.refresh_logs_btn = QPushButton("Refresh")
+        self.refresh_logs_btn.clicked.connect(self.refresh_logs_manually)
+        logs_header.addWidget(self.refresh_logs_btn)
+        
+        self.auto_scroll_btn = QPushButton("Auto-scroll")
+        self.auto_scroll_btn.setCheckable(True)
+        self.auto_scroll_btn.setChecked(True)
+        logs_header.addWidget(self.auto_scroll_btn)
+        
+        logs_layout.addLayout(logs_header)
+        
         self.logs_text = QTextEdit()
         self.logs_text.setFont(QFont("Courier", 9))
         self.logs_text.setReadOnly(True)
@@ -1109,22 +1281,20 @@ class LFSMainWindow(QMainWindow):
         
         right_panel.addTab(logs_tab, "Build Logs")
         
-        # Documents tab
+        # Build Documents tab (build-specific)
         docs_tab = QWidget()
         docs_layout = QVBoxLayout(docs_tab)
         
-        # Document search and stats
-        doc_header_layout = QHBoxLayout()
-        doc_header_layout.addWidget(QLabel("Search Documents:"))
-        self.doc_search_edit = QLineEdit()
-        self.doc_search_edit.textChanged.connect(self.search_documents)
-        doc_header_layout.addWidget(self.doc_search_edit)
+        # Build documents header
+        build_docs_header = QHBoxLayout()
+        build_docs_header.addWidget(QLabel("Build Documents:"))
+        build_docs_header.addStretch()
         
         # Document stats button
         self.doc_stats_btn = QPushButton("Stats")
         self.doc_stats_btn.clicked.connect(self.show_document_stats)
-        doc_header_layout.addWidget(self.doc_stats_btn)
-        docs_layout.addLayout(doc_header_layout)
+        build_docs_header.addWidget(self.doc_stats_btn)
+        docs_layout.addLayout(build_docs_header)
         
         # Document status label
         self.doc_status_label = QLabel("Loading document statistics...")
@@ -1134,60 +1304,237 @@ class LFSMainWindow(QMainWindow):
         # Update stats on startup
         QTimer.singleShot(1000, self.update_document_stats)
         
+        # Build documents list
+        self.build_documents_table = QTableWidget()
+        self.build_documents_table.setColumnCount(4)
+        self.build_documents_table.setHorizontalHeaderLabels(["Type", "Title", "Date", "Size"])
+        self.build_documents_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.build_documents_table.itemClicked.connect(self.view_build_document)
+        docs_layout.addWidget(self.build_documents_table)
+        
+        # Build document viewer
+        self.build_document_viewer = QTextEdit()
+        self.build_document_viewer.setFont(QFont("Courier", 9))
+        self.build_document_viewer.setReadOnly(True)
+        docs_layout.addWidget(self.build_document_viewer)
+        
+        right_panel.addTab(docs_tab, "Build Documents")
+        
+        # Document Browser tab (all documents with pagination)
+        browser_tab = QWidget()
+        browser_layout = QVBoxLayout(browser_tab)
+        
+        # Document search and controls
+        doc_header_layout = QHBoxLayout()
+        doc_header_layout.addWidget(QLabel("Search Documents:"))
+        self.doc_search_edit = QLineEdit()
+        self.doc_search_edit.textChanged.connect(self.search_documents)
+        doc_header_layout.addWidget(self.doc_search_edit)
+        
+        # Browse all button
+        self.browse_all_btn = QPushButton("Browse All")
+        self.browse_all_btn.clicked.connect(self.browse_all_documents)
+        doc_header_layout.addWidget(self.browse_all_btn)
+        
+        browser_layout.addLayout(doc_header_layout)
+        
+        # Pagination controls
+        pagination_layout = QHBoxLayout()
+        
+        self.first_page_btn = QPushButton("<<")
+        self.first_page_btn.clicked.connect(self.go_to_first_page)
+        self.first_page_btn.setMaximumWidth(40)
+        pagination_layout.addWidget(self.first_page_btn)
+        
+        self.prev_page_btn = QPushButton("<")
+        self.prev_page_btn.clicked.connect(self.go_to_prev_page)
+        self.prev_page_btn.setMaximumWidth(40)
+        pagination_layout.addWidget(self.prev_page_btn)
+        
+        self.page_info_label = QLabel("Page 1 of 1")
+        self.page_info_label.setAlignment(Qt.AlignCenter)
+        pagination_layout.addWidget(self.page_info_label)
+        
+        self.next_page_btn = QPushButton(">")
+        self.next_page_btn.clicked.connect(self.go_to_next_page)
+        self.next_page_btn.setMaximumWidth(40)
+        pagination_layout.addWidget(self.next_page_btn)
+        
+        self.last_page_btn = QPushButton(">>")
+        self.last_page_btn.clicked.connect(self.go_to_last_page)
+        self.last_page_btn.setMaximumWidth(40)
+        pagination_layout.addWidget(self.last_page_btn)
+        
+        pagination_layout.addStretch()
+        
+        # Page size selector
+        pagination_layout.addWidget(QLabel("Per page:"))
+        self.page_size_combo = QComboBox()
+        self.page_size_combo.addItems(["25", "50", "100", "200"])
+        self.page_size_combo.setCurrentText("50")
+        self.page_size_combo.currentTextChanged.connect(self.change_page_size)
+        pagination_layout.addWidget(self.page_size_combo)
+        
+        browser_layout.addLayout(pagination_layout)
+        
         # Documents list
         self.documents_table = QTableWidget()
-        self.documents_table.setColumnCount(4)
-        self.documents_table.setHorizontalHeaderLabels(["Type", "Title", "Date", "Size"])
+        self.documents_table.setColumnCount(5)
+        self.documents_table.setHorizontalHeaderLabels(["Build ID", "Type", "Title", "Date", "Size"])
         self.documents_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.documents_table.itemClicked.connect(self.view_document)
-        docs_layout.addWidget(self.documents_table)
+        browser_layout.addWidget(self.documents_table)
         
         # Document viewer
         self.document_viewer = QTextEdit()
         self.document_viewer.setFont(QFont("Courier", 9))
         self.document_viewer.setReadOnly(True)
-        docs_layout.addWidget(self.document_viewer)
+        browser_layout.addWidget(self.document_viewer)
         
-        right_panel.addTab(docs_tab, "Documents")
+        right_panel.addTab(browser_tab, "Document Browser")
         
-        # Repository tab
-        repo_tab = QWidget()
-        repo_layout = QVBoxLayout(repo_tab)
+        # System Status tab
+        status_tab = QWidget()
+        status_layout = QVBoxLayout(status_tab)
         
-        # Repository controls
-        repo_controls = QHBoxLayout()
-        self.branch_combo = QComboBox()
-        self.update_branches()
-        repo_controls.addWidget(QLabel("Branch:"))
-        repo_controls.addWidget(self.branch_combo)
+        # Status header with refresh button
+        status_header = QHBoxLayout()
+        status_header.addWidget(QLabel("System Status:"))
+        status_header.addStretch()
         
-        self.commit_btn = QPushButton("Commit Changes")
-        self.commit_btn.clicked.connect(self.commit_changes)
-        repo_controls.addWidget(self.commit_btn)
-        repo_layout.addLayout(repo_controls)
+        self.refresh_status_btn = QPushButton("Refresh")
+        self.refresh_status_btn.clicked.connect(self.refresh_system_status)
+        status_header.addWidget(self.refresh_status_btn)
         
-        # Repository status
-        self.repo_status = QTextEdit()
-        self.repo_status.setMaximumHeight(100)
-        self.repo_status.setReadOnly(True)
-        repo_layout.addWidget(self.repo_status)
-        self.update_repo_status()
+        status_layout.addLayout(status_header)
         
-        # Repository summary
-        self.repo_summary_label = QLabel("")
-        self.repo_summary_label.setStyleSheet("font-weight: bold; padding: 5px; background-color: #f0f0f0; border: 1px solid #ccc;")
-        repo_layout.addWidget(self.repo_summary_label)
+        # Process status
+        self.process_status = QTextEdit()
+        self.process_status.setFont(QFont("Courier", 9))
+        self.process_status.setReadOnly(True)
+        self.process_status.setMaximumHeight(200)
+        status_layout.addWidget(self.process_status)
         
-        # Repository files
-        repo_layout.addWidget(QLabel("Repository Files:"))
-        self.repo_files_tree = QTreeWidget()
-        self.repo_files_tree.setHeaderLabels(["File", "Size", "Type", "Date"])
-        self.repo_files_tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.repo_files_tree.customContextMenuRequested.connect(self.show_repo_file_context_menu)
-        repo_layout.addWidget(self.repo_files_tree)
-        self.update_repo_files()
+        # Build activity
+        status_layout.addWidget(QLabel("Build Activity:"))
+        self.build_activity = QTextEdit()
+        self.build_activity.setFont(QFont("Courier", 9))
+        self.build_activity.setReadOnly(True)
+        status_layout.addWidget(self.build_activity)
         
-        right_panel.addTab(repo_tab, "Repository")
+        right_panel.addTab(status_tab, "System Status")
+        
+        # Fault Analysis tab
+        analysis_tab = QWidget()
+        analysis_layout = QVBoxLayout(analysis_tab)
+        
+        # Analysis header with controls
+        analysis_header = QHBoxLayout()
+        analysis_header.addWidget(QLabel("Fault Analysis:"))
+        analysis_header.addStretch()
+        
+        self.analyze_btn = QPushButton("Run Comprehensive Analysis")
+        self.analyze_btn.clicked.connect(self.run_fault_analysis)
+        analysis_header.addWidget(self.analyze_btn)
+        
+        # Pattern management buttons
+        self.export_patterns_btn = QPushButton("Export Patterns")
+        self.export_patterns_btn.clicked.connect(self.export_fault_patterns)
+        analysis_header.addWidget(self.export_patterns_btn)
+        
+        self.import_patterns_btn = QPushButton("Import Patterns")
+        self.import_patterns_btn.clicked.connect(self.import_fault_patterns)
+        analysis_header.addWidget(self.import_patterns_btn)
+        
+        # Advanced analysis buttons
+        self.health_report_btn = QPushButton("Health Report")
+        self.health_report_btn.clicked.connect(self.generate_health_report)
+        analysis_header.addWidget(self.health_report_btn)
+        
+        self.predict_build_btn = QPushButton("Predict Build")
+        self.predict_build_btn.clicked.connect(self.predict_next_build)
+        analysis_header.addWidget(self.predict_build_btn)
+        
+        self.learning_insights_btn = QPushButton("Learning Insights")
+        self.learning_insights_btn.clicked.connect(self.show_learning_insights)
+        analysis_header.addWidget(self.learning_insights_btn)
+        
+        # Days selector
+        analysis_header.addWidget(QLabel("Days:"))
+        self.days_combo = QComboBox()
+        self.days_combo.addItems(["7", "14", "30", "60", "90"])
+        self.days_combo.setCurrentText("30")
+        analysis_header.addWidget(self.days_combo)
+        
+        analysis_layout.addLayout(analysis_header)
+        
+        # Analysis results with tabs
+        self.analysis_results_tabs = QTabWidget()
+        
+        # Main analysis tab
+        self.analysis_results = QTextEdit()
+        self.analysis_results.setFont(QFont("Courier", 9))
+        self.analysis_results.setReadOnly(True)
+        self.analysis_results_tabs.addTab(self.analysis_results, "Analysis Results")
+        
+        # Stage analysis tab
+        self.stage_results = QTextEdit()
+        self.stage_results.setFont(QFont("Courier", 9))
+        self.stage_results.setReadOnly(True)
+        self.analysis_results_tabs.addTab(self.stage_results, "Stage Analysis")
+        
+        # Trends tab
+        self.trends_results = QTextEdit()
+        self.trends_results.setFont(QFont("Courier", 9))
+        self.trends_results.setReadOnly(True)
+        self.analysis_results_tabs.addTab(self.trends_results, "Trends")
+        
+        # New patterns tab
+        self.new_patterns_results = QTextEdit()
+        self.new_patterns_results.setFont(QFont("Courier", 9))
+        self.new_patterns_results.setReadOnly(True)
+        self.analysis_results_tabs.addTab(self.new_patterns_results, "New Patterns")
+        
+        # Performance analysis tab
+        self.performance_results = QTextEdit()
+        self.performance_results.setFont(QFont("Courier", 9))
+        self.performance_results.setReadOnly(True)
+        self.analysis_results_tabs.addTab(self.performance_results, "Performance")
+        
+        # Predictive analysis tab
+        self.predictive_results = QTextEdit()
+        self.predictive_results.setFont(QFont("Courier", 9))
+        self.predictive_results.setReadOnly(True)
+        self.analysis_results_tabs.addTab(self.predictive_results, "Predictions")
+        
+        # Root cause analysis tab
+        self.root_cause_results = QTextEdit()
+        self.root_cause_results.setFont(QFont("Courier", 9))
+        self.root_cause_results.setReadOnly(True)
+        self.analysis_results_tabs.addTab(self.root_cause_results, "Root Cause")
+        
+        # System health tab
+        self.health_results = QTextEdit()
+        self.health_results.setFont(QFont("Courier", 9))
+        self.health_results.setReadOnly(True)
+        self.analysis_results_tabs.addTab(self.health_results, "System Health")
+        
+        # Learning insights tab
+        self.learning_results = QTextEdit()
+        self.learning_results.setFont(QFont("Courier", 9))
+        self.learning_results.setReadOnly(True)
+        self.analysis_results_tabs.addTab(self.learning_results, "AI Learning")
+        
+        analysis_layout.addWidget(self.analysis_results_tabs)
+        
+        right_panel.addTab(analysis_tab, "Fault Analysis")
+        
+        # Git interface tab
+        try:
+            self.git_tab = GitMainInterface(self.repo_manager)
+            right_panel.addTab(self.git_tab, "Git")
+        except Exception as e:
+            print(f"Warning: Git interface not available: {e}")
         
         main_layout.addWidget(right_panel)
     
@@ -1207,6 +1554,14 @@ class LFSMainWindow(QMainWindow):
             QMessageBox.warning(self, "No Configuration", "Please create a build configuration first.")
             return
         
+        # Request sudo password before starting build
+        password = SudoPasswordDialog.get_sudo_password(self)
+        if not password:
+            return  # User cancelled
+        
+        # Set sudo password in build engine
+        self.build_engine.set_sudo_password(password)
+        
         # Use the most recent config for now
         config_path = configs[0]['path']
         
@@ -1214,8 +1569,13 @@ class LFSMainWindow(QMainWindow):
             build_id = self.build_engine.start_build(config_path)
             self.current_build_id = build_id
             
+            # Enable build monitoring
             self.monitor_thread.set_build_id(build_id)
             self.monitor_thread.start()
+            print("✓ Build monitoring enabled")
+            
+            # Start live logs refresh
+            self.logs_refresh_timer.start(2000)
             
             self.start_build_action.setEnabled(False)
             self.cancel_build_action.setEnabled(True)
@@ -1263,8 +1623,8 @@ class LFSMainWindow(QMainWindow):
         build_id = item.text(0)
         self.current_build_id = build_id
         self.display_build_details(build_id)
-        # Clear document search when selecting a build
-        self.doc_search_edit.clear()
+        # Load build-specific documents
+        self.load_build_documents(build_id)
         # Update document stats
         self.update_document_stats()
     
@@ -1326,10 +1686,14 @@ class LFSMainWindow(QMainWindow):
         self.build_id_label.setText(build['build_id'])
         self.build_status_label.setText(build['status'])
         
-        # Update progress
+        # Update progress - count only truly completed stages
         if build['total_stages'] > 0:
-            progress = (build['completed_stages'] / build['total_stages']) * 100
-            self.progress_bar.setValue(int(progress))
+            # Count stages that are actually 'success' status
+            completed_count = sum(1 for stage in stages if isinstance(stage, dict) and stage.get('status') == 'success')
+            progress = (completed_count / build['total_stages']) * 100
+            self.progress_bar.setValue(int(min(progress, 100)))  # Cap at 100%
+        else:
+            self.progress_bar.setValue(0)
         
         # Update stages
         self.stages_tree.clear()
@@ -1369,9 +1733,10 @@ class LFSMainWindow(QMainWindow):
         if build_details and build_details.get('build'):
             build_id = build_details['build']['build_id']
             self.display_build_details(build_id)
-            # Update live logs for running builds
-            if build_details['build']['status'] == 'running':
-                self.update_live_logs(build_details)
+            # Always update live logs when build details change
+            self.update_live_logs(build_details)
+            # Update refresh button state
+            self.refresh_logs_btn.setText(f"Refresh ({datetime.now().strftime('%H:%M:%S')})")
     
     def search_builds(self):
         query = self.search_edit.text()
@@ -1398,21 +1763,20 @@ class LFSMainWindow(QMainWindow):
         query = self.doc_search_edit.text().strip()
         
         if not query:
-            # Show all documents when no search query
-            self.load_all_documents()
+            # Return to browse mode when search is cleared
+            self.browse_all_documents()
             return
         
         try:
             # Search documents across all builds
             documents = self.db.search_documents(query)
             
+            # Set to 5 columns for search results
+            self.documents_table.setColumnCount(5)
+            self.documents_table.setHorizontalHeaderLabels(["Build ID", "Type", "Title", "Date", "Size"])
+            
             self.documents_table.setRowCount(len(documents))
             for i, doc in enumerate(documents):
-                # Add build ID column for global search
-                if self.documents_table.columnCount() < 5:
-                    self.documents_table.setColumnCount(5)
-                    self.documents_table.setHorizontalHeaderLabels(["Build ID", "Type", "Title", "Date", "Size"])
-                
                 self.documents_table.setItem(i, 0, QTableWidgetItem(doc['build_id']))
                 self.documents_table.setItem(i, 1, QTableWidgetItem(doc['document_type']))
                 self.documents_table.setItem(i, 2, QTableWidgetItem(doc['title']))
@@ -1433,30 +1797,8 @@ class LFSMainWindow(QMainWindow):
     
     def load_build_documents(self, build_id: str):
         """Load documents for a specific build"""
-        try:
-            documents = self.db.get_build_documents(build_id)
-            
-            # Reset to 4 columns for build-specific view
-            self.documents_table.setColumnCount(4)
-            self.documents_table.setHorizontalHeaderLabels(["Type", "Title", "Date", "Size"])
-            
-            self.documents_table.setRowCount(len(documents))
-            for i, doc in enumerate(documents):
-                self.documents_table.setItem(i, 0, QTableWidgetItem(doc['document_type']))
-                self.documents_table.setItem(i, 1, QTableWidgetItem(doc['title']))
-                self.documents_table.setItem(i, 2, QTableWidgetItem(doc['created_at'].strftime('%Y-%m-%d %H:%M:%S')))
-                self.documents_table.setItem(i, 3, QTableWidgetItem(f"{len(doc['content'])} chars"))
-                
-                # Store document data for viewing
-                self.documents_table.item(i, 0).setData(Qt.UserRole, doc)
-            
-            if documents:
-                self.document_viewer.setPlainText(f"Build {build_id} has {len(documents)} documents\n\nClick on a document to view its content.")
-            else:
-                self.document_viewer.setPlainText(f"No documents found for build {build_id}")
-                
-        except Exception as e:
-            print(f"Error loading documents: {e}")
+        self.current_build_id = build_id
+        self.load_build_documents_display(build_id)
     
     def view_document(self, item):
         """View selected document content"""
@@ -1478,26 +1820,7 @@ class LFSMainWindow(QMainWindow):
                     
                     self.document_viewer.setPlainText(content)
     
-    def update_branches(self):
-        branches = self.repo_manager.list_branches()
-        self.branch_combo.clear()
-        self.branch_combo.addItems(branches)
-    
-    def update_repo_status(self):
-        status = self.repo_manager.get_repository_status()
-        status_text = f"""Current Branch: {status.get('current_branch', 'Unknown')}
-Uncommitted Changes: {'Yes' if status.get('uncommitted_changes') else 'No'}
-Untracked Files: {'Yes' if status.get('untracked_files') else 'No'}
-Last Commit: {status.get('last_commit', {}).get('message', 'None')}"""
-        self.repo_status.setPlainText(status_text)
-    
-    def commit_changes(self):
-        message, ok = QLineEdit().text(), True  # Simplified for demo
-        if ok and message:
-            commit_hash = self.repo_manager.commit_changes(message, self.current_build_id)
-            if commit_hash:
-                QMessageBox.information(self, "Success", f"Changes committed: {commit_hash[:8]}")
-                self.update_repo_status()
+
     
     def on_stage_start(self, data):
         print(f"Stage started: {data['stage']}")
@@ -1512,6 +1835,121 @@ Last Commit: {status.get('last_commit', {}).get('message', 'None')}"""
         self.cancel_build_action.setEnabled(False)
         self.load_build_history()
         self.update_document_stats()
+        # Stop live logs refresh for completed builds
+        self.logs_refresh_timer.stop()
+        # Refresh documents for completed build
+        if self.current_build_id:
+            self.load_build_documents(self.current_build_id)
+            self.refresh_logs_manually()
+    
+    def refresh_current_build_documents(self):
+        """Refresh documents for current build"""
+        if self.current_build_id:
+            self.load_build_documents(self.current_build_id)
+            self.update_document_stats()
+    
+    def view_build_document(self, item):
+        """View selected build document content"""
+        row = item.row()
+        if row >= 0:
+            # Get document data from the first column item
+            doc_item = self.build_documents_table.item(row, 0)
+            if doc_item:
+                doc = doc_item.data(Qt.UserRole)
+                if doc:
+                    # Format document content for viewing
+                    content = f"Document: {doc['title']}\n"
+                    content += f"Type: {doc['document_type']}\n"
+                    content += f"Build ID: {doc['build_id']}\n"
+                    content += f"Created: {doc['created_at']}\n"
+                    content += f"Size: {len(doc['content'])} characters\n"
+                    content += "=" * 50 + "\n\n"
+                    content += doc['content']
+                    
+                    self.build_document_viewer.setPlainText(content)
+    
+    def refresh_logs_manually(self):
+        """Manually refresh logs for current build"""
+        if self.current_build_id:
+            try:
+                build_details = self.db.get_build_details(self.current_build_id)
+                if build_details:
+                    self.update_live_logs(build_details)
+            except Exception as e:
+                print(f"Error refreshing logs: {e}")
+    
+    def refresh_system_status(self):
+        """Refresh system status display"""
+        try:
+            import subprocess
+            
+            # Get build-related processes
+            result = subprocess.run(
+                ['ps', 'aux'], 
+                capture_output=True, 
+                text=True, 
+                timeout=5
+            )
+            
+            if result.returncode == 0:
+                lines = result.stdout.split('\n')
+                build_processes = []
+                
+                for line in lines:
+                    if any(keyword in line.lower() for keyword in ['python', 'bash', 'make', 'gcc', 'configure']):
+                        if 'grep' not in line and line.strip():
+                            build_processes.append(line)
+                
+                # Format process status
+                process_text = f"Active Build Processes ({len(build_processes)} found):\n\n"
+                for i, proc in enumerate(build_processes[:10]):  # Show top 10
+                    parts = proc.split()
+                    if len(parts) >= 11:
+                        pid = parts[1]
+                        cpu = parts[2]
+                        mem = parts[3]
+                        command = ' '.join(parts[10:])[:80] + '...' if len(' '.join(parts[10:])) > 80 else ' '.join(parts[10:])
+                        process_text += f"PID {pid}: {cpu}% CPU, {mem}% MEM\n{command}\n\n"
+                
+                self.process_status.setPlainText(process_text)
+                
+                # Update build activity
+                if self.current_build_id:
+                    build_details = self.db.get_build_details(self.current_build_id)
+                    if build_details:
+                        build = build_details.get('build', {})
+                        stages = build_details.get('stages', [])
+                        
+                        activity_text = f"Current Build: {self.current_build_id}\n"
+                        activity_text += f"Status: {build.get('status', 'unknown')}\n"
+                        activity_text += f"Progress: {build.get('completed_stages', 0)}/{build.get('total_stages', 0)} stages\n\n"
+                        
+                        # Show current stage status
+                        running_stages = [s for s in stages if isinstance(s, dict) and s.get('status') == 'running']
+                        if running_stages:
+                            activity_text += "Currently Running:\n"
+                            for stage in running_stages:
+                                activity_text += f"• {stage.get('stage_name', 'Unknown')}\n"
+                        
+                        # Show recent completed stages
+                        completed_stages = [s for s in stages if isinstance(s, dict) and s.get('status') == 'success']
+                        if completed_stages:
+                            activity_text += f"\nCompleted Stages ({len(completed_stages)}):\n"
+                            for stage in completed_stages[-3:]:  # Show last 3
+                                activity_text += f"✓ {stage.get('stage_name', 'Unknown')}\n"
+                        
+                        self.build_activity.setPlainText(activity_text)
+                    else:
+                        self.build_activity.setPlainText("No active build")
+                else:
+                    self.build_activity.setPlainText("No build selected")
+                
+                # Update refresh button
+                self.refresh_status_btn.setText(f"Refresh ({datetime.now().strftime('%H:%M:%S')})")
+            
+        except Exception as e:
+            self.process_status.setPlainText(f"Error getting system status: {str(e)}")
+            self.build_activity.setPlainText("Status unavailable")
     
     def on_build_error(self, data):
         print(f"Build error: {data.get('error', 'Unknown error')}")
@@ -1520,13 +1958,24 @@ Last Commit: {status.get('last_commit', {}).get('message', 'None')}"""
         self.cancel_build_action.setEnabled(False)
         self.update_document_stats()
     
+    def on_sudo_required(self, data):
+        """Handle sudo password request during build"""
+        password = SudoPasswordDialog.get_sudo_password(self)
+        if password:
+            self.build_engine.set_sudo_password(password)
+            # Resume the build stage that was waiting for password
+            # This would require more complex build engine modifications
+        else:
+            # User cancelled - cancel the build
+            self.build_engine.cancel_build(data['build_id'])
+    
     def on_package_cached(self, package_name: str, cache_info: dict):
         """Handle package successfully cached - update repository view"""
         print(f"📦 Package {package_name} cached - updating repository view")
         
-        # Update repository status and files
-        self.update_repo_status()
-        self.update_repo_files()
+        # Update git tab repository files if available
+        if hasattr(self, 'git_tab'):
+            self.git_tab.update_repo_files()
         
         # If package manager dialog is open, refresh it
         for widget in self.findChildren(PackageManagerDialog):
@@ -1598,7 +2047,9 @@ Last Commit: {status.get('last_commit', {}).get('message', 'None')}"""
             if download_count > 0:
                 commit_msg = f"LFS sources: {cached_count} cached, {download_count} downloaded, {failed_count} failed"
                 self.repo_manager.commit_changes(commit_msg, self.download_id)
-                self.update_repo_status()
+                # Update git tab if available
+                if hasattr(self, 'git_tab'):
+                    self.git_tab.refresh_all()
         except Exception as e:
             print(f"Commit error: {e}")
         
@@ -1678,8 +2129,10 @@ Last Commit: {status.get('last_commit', {}).get('message', 'None')}"""
                 self.repo_manager = RepositoryManager(self.db)
                 self.build_engine.repo = self.repo_manager
                 self.build_engine.downloader.repo = self.repo_manager
-                self.update_repo_status()
-                self.update_repo_files()
+                # Update git tab if available
+                if hasattr(self, 'git_tab'):
+                    self.git_tab.repo_manager = self.repo_manager
+                    self.git_tab.refresh_all()
                 QMessageBox.information(self, "Settings Updated", 
                                        f"Repository path changed to: {new_repo_path}")
             else:
@@ -1739,331 +2192,778 @@ By Document Type:
     def update_live_logs(self, build_details):
         """Update logs in real-time for running builds"""
         try:
+            if not isinstance(build_details, dict):
+                return
+                
             stages = build_details.get('stages', [])
+            documents = build_details.get('documents', [])
             
-            # Build live log content
+            # Ensure stages and documents are lists
+            if not isinstance(stages, list):
+                stages = []
+            if not isinstance(documents, list):
+                documents = []
+            
+            # Build live log content from stages and real-time documents
             log_content = ""
-            for stage in stages:
-                log_content += f"=== {stage['stage_name']} ({stage['status']}) ===\n"
-                if stage.get('output_log'):
-                    log_content += stage['output_log'] + "\n"
-                if stage.get('error_log'):
-                    log_content += "ERRORS:\n" + stage['error_log'] + "\n"
+            
+            # Sort documents by creation time for chronological order
+            valid_docs = [doc for doc in documents if isinstance(doc, dict)]
+            sorted_docs = sorted(valid_docs, key=lambda x: x.get('created_at', datetime.min))
+            
+            # Group documents by stage for better organization
+            stage_docs = {}
+            general_docs = []
+            
+            for doc in sorted_docs:
+                if not isinstance(doc, dict):
+                    continue
+                if doc.get('document_type') == 'log':
+                    metadata = doc.get('metadata', {})
+                    if isinstance(metadata, dict):
+                        stage_order = metadata.get('stage_order')
+                        if stage_order is not None:
+                            if stage_order not in stage_docs:
+                                stage_docs[stage_order] = []
+                            stage_docs[stage_order].append(doc)
+                        else:
+                            general_docs.append(doc)
+            
+            # Add general documents first (config, setup, etc.)
+            for doc in general_docs:
+                if not isinstance(doc, dict):
+                    continue
+                metadata = doc.get('metadata', {})
+                title = doc.get('title', '')
+                if isinstance(metadata, dict) and isinstance(title, str):
+                    if 'setup' in metadata or 'config' in title.lower():
+                        log_content += f"=== {title} ===\n"
+                        log_content += str(doc.get('content', '')) + "\n\n"
+            
+            # Add stage-specific content in order
+            valid_stages = [stage for stage in stages if isinstance(stage, dict)]
+            for stage in valid_stages:
+                stage_order = stage.get('stage_order')
+                stage_name = stage.get('stage_name', 'Unknown')
+                stage_status = stage.get('status', 'unknown')
+                log_content += f"=== {stage_name} ({stage_status}) ===\n"
+                
+                # Add real-time documents for this stage
+                if stage_order in stage_docs:
+                    for doc in stage_docs[stage_order]:
+                        if not isinstance(doc, dict):
+                            continue
+                        metadata = doc.get('metadata', {})
+                        if isinstance(metadata, dict):
+                            if metadata.get('progress'):
+                                # Show progress updates
+                                line_count = metadata.get('line_count', 0)
+                                log_content += f"[Progress: {line_count} lines processed]\n"
+                                # Show recent output from progress document
+                                content = str(doc.get('content', ''))
+                                content_lines = content.split('\n')
+                                for line in content_lines:
+                                    if line.startswith('Recent output:'):
+                                        # Show the recent output section
+                                        remaining_lines = content_lines[content_lines.index(line):]
+                                        log_content += '\n'.join(remaining_lines) + "\n"
+                                        break
+                            elif metadata.get('error_line'):
+                                # Show error lines immediately
+                                log_content += f"ERROR: {doc.get('content', '')}\n"
+                            elif metadata.get('warnings'):
+                                # Show warnings summary
+                                warning_count = metadata.get('warning_count', 0)
+                                log_content += f"[{warning_count} warnings collected]\n"
+                
+                # Add final stage output if available
+                output_log = stage.get('output_log')
+                error_log = stage.get('error_log')
+                if output_log:
+                    log_content += str(output_log) + "\n"
+                if error_log:
+                    log_content += "ERRORS:\n" + str(error_log) + "\n"
                 log_content += "\n"
             
             # Add current status
             build = build_details.get('build', {})
-            log_content += f"\n=== BUILD STATUS ===\n"
-            log_content += f"Status: {build.get('status', 'unknown')}\n"
-            log_content += f"Completed Stages: {build.get('completed_stages', 0)}/{build.get('total_stages', 0)}\n"
+            if isinstance(build, dict):
+                log_content += f"\n=== BUILD STATUS ===\n"
+                log_content += f"Status: {build.get('status', 'unknown')}\n"
+                log_content += f"Completed Stages: {build.get('completed_stages', 0)}/{build.get('total_stages', 0)}\n"
+            
+            # Add timestamp
+            log_content += f"Last Updated: {datetime.now().strftime('%H:%M:%S')}\n"
             
             # Update logs text
             self.logs_text.setPlainText(log_content)
             
-            # Auto-scroll to bottom
-            scrollbar = self.logs_text.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+            # Auto-scroll to bottom for live updates if enabled
+            if self.auto_scroll_btn.isChecked():
+                scrollbar = self.logs_text.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
             
         except Exception as e:
-            print(f"Error updating live logs: {e}")
+            # Silently handle errors to avoid spam
+            pass
     
     def load_all_documents(self):
-        """Load all documents from all builds"""
+        """Load all documents from all builds (deprecated - use browse_all_documents)"""
+        self.browse_all_documents()
+    
+    def browse_all_documents(self):
+        """Browse all documents with pagination"""
+        self.current_page = 1
+        self.load_documents_page()
+    
+    def load_documents_page(self):
+        """Load documents for current page (Document Browser tab)"""
         try:
-            # Get all documents across all builds
-            documents = self.db.get_all_documents()
+            offset = (self.current_page - 1) * self.page_size
             
-            # Set to 5 columns for all documents view
+            # Get total count
+            self.total_documents = self.db.get_documents_count()
+            self.total_pages = max(1, (self.total_documents + self.page_size - 1) // self.page_size)
+            
+            # Get documents for current page
+            documents = self.db.get_documents_paginated(offset, self.page_size)
+            
+            # Always use 5 columns for document browser
             self.documents_table.setColumnCount(5)
             self.documents_table.setHorizontalHeaderLabels(["Build ID", "Type", "Title", "Date", "Size"])
             
+            info_text = f"Browsing all documents (Page {self.current_page} of {self.total_pages}, {self.total_documents} total)"
+            
             self.documents_table.setRowCount(len(documents))
+            
             for i, doc in enumerate(documents):
                 self.documents_table.setItem(i, 0, QTableWidgetItem(doc['build_id']))
                 self.documents_table.setItem(i, 1, QTableWidgetItem(doc['document_type']))
                 self.documents_table.setItem(i, 2, QTableWidgetItem(doc['title']))
                 self.documents_table.setItem(i, 3, QTableWidgetItem(doc['created_at'].strftime('%Y-%m-%d %H:%M:%S')))
                 self.documents_table.setItem(i, 4, QTableWidgetItem(f"{len(doc['content'])} chars"))
-                
                 # Store document data for viewing
                 self.documents_table.item(i, 0).setData(Qt.UserRole, doc)
             
+            # Update pagination controls
+            self.update_pagination_controls()
+            
             if documents:
-                self.document_viewer.setPlainText(f"Showing all {len(documents)} documents\n\nClick on a document to view its content.")
+                self.document_viewer.setPlainText(f"{info_text}\n\nClick on a document to view its content.")
             else:
-                self.document_viewer.setPlainText("No documents found in database")
+                self.document_viewer.setPlainText(f"{info_text}\n\nNo documents found.")
                 
         except Exception as e:
-            print(f"Error loading all documents: {e}")
+            print(f"Error loading documents page: {e}")
             self.document_viewer.setPlainText(f"Error loading documents: {str(e)}")
     
-    def update_repo_files(self):
-        """Update repository files display and summary"""
-        self.repo_files_tree.clear()
-        
+    def load_build_documents_display(self, build_id: str):
+        """Load documents for a specific build (Build Documents tab)"""
         try:
-            # Get package status
-            all_packages = self.build_engine.downloader.get_package_list()
-            cached_packages = self.build_engine.downloader.get_cached_packages() or []
+            documents = self.db.get_build_documents(build_id)
             
-            # Create lookup for cached packages
-            cached_lookup = {pkg['package_name']: pkg for pkg in cached_packages}
+            # Set to 4 columns for build-specific view
+            self.build_documents_table.setColumnCount(4)
+            self.build_documents_table.setHorizontalHeaderLabels(["Type", "Title", "Date", "Size"])
             
-            # Analyze package status
-            total_packages = len(all_packages)
-            cached_count = len(cached_packages)
-            missing_packages = []
-            
-            for pkg in all_packages:
-                if pkg['name'] not in cached_lookup:
-                    missing_packages.append(pkg['name'])
-            
-            missing_count = len(missing_packages)
-            
-            # Check for active downloads
-            downloading_count = 0
-            if hasattr(self, 'download_thread') and self.download_thread.isRunning():
-                downloading_count = missing_count  # Assume all missing are being downloaded
-            
-            # Update summary
-            summary_text = f"📦 Packages: {cached_count}/{total_packages} cached"
-            if missing_count > 0:
-                summary_text += f" | ⚠ {missing_count} missing"
-            if downloading_count > 0:
-                summary_text += f" | ⬇ {downloading_count} downloading"
-            
-            self.repo_summary_label.setText(summary_text)
-            
-            # Show missing packages in tooltip if any
-            if missing_packages:
-                missing_list = ", ".join(missing_packages[:10])  # Show first 10
-                if len(missing_packages) > 10:
-                    missing_list += f" and {len(missing_packages) - 10} more..."
-                self.repo_summary_label.setToolTip(f"Missing packages: {missing_list}")
-            else:
-                self.repo_summary_label.setToolTip("All required packages are cached")
-            
-            sources_dir = self.repo_manager.repo_path / "sources"
-            if not sources_dir.exists():
-                return
-            
-            # Add cached packages to tree
-            for pkg in cached_packages:
-                filename = pkg['url'].split('/')[-1] if 'url' in pkg else f"{pkg['package_name']}-{pkg['version']}"
-                file_path = sources_dir / filename
+            self.build_documents_table.setRowCount(len(documents))
+            for i, doc in enumerate(documents):
+                self.build_documents_table.setItem(i, 0, QTableWidgetItem(doc['document_type']))
+                self.build_documents_table.setItem(i, 1, QTableWidgetItem(doc['title']))
+                self.build_documents_table.setItem(i, 2, QTableWidgetItem(doc['created_at'].strftime('%Y-%m-%d %H:%M:%S')))
+                self.build_documents_table.setItem(i, 3, QTableWidgetItem(f"{len(doc['content'])} chars"))
                 
-                if file_path.exists():
-                    size_mb = pkg.get('file_size', 0) / (1024 * 1024)
-                    date_str = pkg.get('downloaded_at', 'Unknown')[:19] if pkg.get('downloaded_at') else 'Unknown'
-                    
-                    item = QTreeWidgetItem([
-                        filename,
-                        f"{size_mb:.1f} MB",
-                        "Package",
-                        date_str
-                    ])
-                    item.setData(0, Qt.UserRole, str(file_path))
-                    self.repo_files_tree.addTopLevelItem(item)
+                # Store document data for viewing
+                self.build_documents_table.item(i, 0).setData(Qt.UserRole, doc)
             
-            # Add other files in sources directory
-            for file_path in sources_dir.iterdir():
-                if file_path.is_file() and not file_path.name.endswith('.info'):
-                    # Check if already added as cached package
-                    already_added = False
-                    for i in range(self.repo_files_tree.topLevelItemCount()):
-                        if self.repo_files_tree.topLevelItem(i).text(0) == file_path.name:
-                            already_added = True
-                            break
-                    
-                    if not already_added:
-                        size_mb = file_path.stat().st_size / (1024 * 1024)
-                        date_str = datetime.fromtimestamp(file_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-                        
-                        item = QTreeWidgetItem([
-                            file_path.name,
-                            f"{size_mb:.1f} MB",
-                            "File",
-                            date_str
-                        ])
-                        item.setData(0, Qt.UserRole, str(file_path))
-                        self.repo_files_tree.addTopLevelItem(item)
-            
-            # Sort by filename
-            self.repo_files_tree.sortItems(0, Qt.AscendingOrder)
-            
+            if documents:
+                self.build_document_viewer.setPlainText(f"Build {build_id} has {len(documents)} documents\n\nClick on a document to view its content.")
+            else:
+                self.build_document_viewer.setPlainText(f"No documents found for build {build_id}")
+                
         except Exception as e:
-            print(f"Error updating repo files: {e}")
-            self.repo_summary_label.setText("📦 Repository status unavailable")
+            print(f"Error loading build documents: {e}")
+            self.build_document_viewer.setPlainText(f"Error loading documents: {str(e)}")
     
-    def show_repo_file_context_menu(self, position):
-        """Show context menu for repository files"""
-        item = self.repo_files_tree.itemAt(position)
-        if item:
-            menu = QMenu()
-            
-            open_action = menu.addAction("Open File Location")
-            open_action.triggered.connect(lambda: self.open_file_location(item))
-            
-            verify_action = menu.addAction("Verify Checksum")
-            verify_action.triggered.connect(lambda: self.verify_file_checksum(item))
-            
-            menu.addSeparator()
-            
-            missing_action = menu.addAction("Show Missing Packages")
-            missing_action.triggered.connect(self.show_missing_packages)
-            
-            menu.exec_(self.repo_files_tree.mapToGlobal(position))
+    def update_pagination_controls(self):
+        """Update pagination button states and labels"""
+        self.page_info_label.setText(f"Page {self.current_page} of {self.total_pages} ({self.total_documents} docs)")
+        
+        # Enable/disable buttons
+        self.first_page_btn.setEnabled(self.current_page > 1)
+        self.prev_page_btn.setEnabled(self.current_page > 1)
+        self.next_page_btn.setEnabled(self.current_page < self.total_pages)
+        self.last_page_btn.setEnabled(self.current_page < self.total_pages)
     
-    def open_file_location(self, item):
-        """Open file location in system file manager"""
-        file_path = item.data(0, Qt.UserRole)
-        if file_path:
+    def go_to_first_page(self):
+        """Go to first page"""
+        self.current_page = 1
+        self.load_documents_page()
+    
+    def go_to_prev_page(self):
+        """Go to previous page"""
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.load_documents_page()
+    
+    def go_to_next_page(self):
+        """Go to next page"""
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self.load_documents_page()
+    
+    def go_to_last_page(self):
+        """Go to last page"""
+        self.current_page = self.total_pages
+        self.load_documents_page()
+    
+    def change_page_size(self):
+        """Change page size and reload"""
+        self.page_size = int(self.page_size_combo.currentText())
+        self.current_page = 1  # Reset to first page
+        self.load_documents_page()
+    
+
+    
+    def setup_lfs_permissions_interactive(self):
+        """Interactive LFS permissions setup with sudo password dialog"""
+        try:
+            password = SudoPasswordDialog.get_sudo_password(self, "LFS Setup Required", 
+                "LFS directory permissions need to be configured for package copying.")
+            if not password:
+                return False
+            
             import subprocess
+            import tempfile
+            import os
+            
+            # Create askpass script
+            askpass_script = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh')
+            askpass_script.write(f'#!/bin/bash\necho "{password}"\n')
+            askpass_script.close()
+            os.chmod(askpass_script.name, 0o755)
+            
+            # Set environment
+            env = os.environ.copy()
+            env['SUDO_ASKPASS'] = askpass_script.name
+            
             try:
-                # Open directory containing the file
-                subprocess.run(['xdg-open', os.path.dirname(file_path)])
-            except Exception as e:
-                QMessageBox.warning(self, "Error", f"Could not open file location: {str(e)}")
-    
-    def verify_file_checksum(self, item):
-        """Verify file checksum against known packages"""
-        filename = item.text(0)
-        file_path = item.data(0, Qt.UserRole)
-        
-        if not file_path or not os.path.exists(file_path):
-            QMessageBox.warning(self, "Error", "File not found")
-            return
-        
-        try:
-            # Find matching package in our list
-            packages = self.build_engine.downloader.get_package_list()
-            matching_package = None
-            
-            for pkg in packages:
-                pkg_filename = pkg['url'].split('/')[-1]
-                if pkg_filename == filename:
-                    matching_package = pkg
-                    break
-            
-            if matching_package:
-                # Verify checksum
-                from pathlib import Path
-                actual_md5 = self.build_engine.downloader.get_file_md5(Path(file_path))
-                expected_md5 = matching_package['md5']
+                # Setup LFS directories
+                subprocess.run(['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/sources'], 
+                             env=env, check=True)
+                subprocess.run(['sudo', '-A', 'chmod', '777', '/mnt/lfs/sources'], 
+                             env=env, check=True)
                 
-                if actual_md5 == expected_md5:
-                    QMessageBox.information(self, "Checksum Verification", 
-                                           f"✓ File verified successfully\n\n"
-                                           f"File: {filename}\n"
-                                           f"MD5: {actual_md5}")
+                self.statusBar().showMessage("✓ LFS permissions configured successfully", 5000)
+                return True
+                
+            finally:
+                # Cleanup askpass script
+                try:
+                    os.unlink(askpass_script.name)
+                except:
+                    pass
+                    
+        except subprocess.CalledProcessError as e:
+            QMessageBox.critical(self, "Setup Error", f"Failed to setup LFS permissions: {e}")
+            return False
+        except Exception as e:
+            QMessageBox.critical(self, "Setup Error", f"LFS setup failed: {str(e)}")
+            return False
+    
+    def export_fault_patterns(self):
+        """Export fault patterns to JSON file"""
+        try:
+            filename, _ = QFileDialog.getSaveFileName(
+                self, "Export Fault Patterns", 
+                f"lfs_fault_patterns_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                "JSON Files (*.json)"
+            )
+            
+            if filename:
+                result = self.fault_analyzer.export_patterns(os.path.basename(filename))
+                if "Export failed" in result:
+                    QMessageBox.warning(self, "Export Failed", result)
                 else:
-                    QMessageBox.warning(self, "Checksum Verification", 
-                                       f"✗ Checksum mismatch!\n\n"
-                                       f"File: {filename}\n"
-                                       f"Expected: {expected_md5}\n"
-                                       f"Actual: {actual_md5}")
-            else:
-                # Just show the file's checksum
-                from pathlib import Path
-                actual_md5 = self.build_engine.downloader.get_file_md5(Path(file_path))
-                QMessageBox.information(self, "File Checksum", 
-                                       f"File: {filename}\n"
-                                       f"MD5: {actual_md5}\n\n"
-                                       f"(No matching package found for verification)")
-                
+                    QMessageBox.information(self, "Export Successful", f"Patterns exported to: {result}")
         except Exception as e:
-            QMessageBox.critical(self, "Verification Error", f"Failed to verify checksum: {str(e)}")
+            QMessageBox.critical(self, "Export Error", f"Failed to export patterns: {str(e)}")
     
-    def show_missing_packages(self):
-        """Show detailed missing packages information"""
+    def import_fault_patterns(self):
+        """Import fault patterns from JSON file"""
         try:
-            all_packages = self.build_engine.downloader.get_package_list()
-            cached_packages = self.build_engine.downloader.get_cached_packages() or []
+            filename, _ = QFileDialog.getOpenFileName(
+                self, "Import Fault Patterns", "",
+                "JSON Files (*.json)"
+            )
             
-            # Create lookup for cached packages
-            cached_lookup = {pkg['package_name']: pkg for pkg in cached_packages}
+            if filename:
+                result = self.fault_analyzer.import_patterns(filename)
+                if result['success']:
+                    QMessageBox.information(self, "Import Successful", result['message'])
+                else:
+                    QMessageBox.warning(self, "Import Failed", result['error'])
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Failed to import patterns: {str(e)}")
+    
+    def run_fault_analysis(self):
+        """Run comprehensive fault analysis on recent build failures"""
+        try:
+            days = int(self.days_combo.currentText())
             
-            missing_packages = []
-            for pkg in all_packages:
-                if pkg['name'] not in cached_lookup:
-                    missing_packages.append(pkg)
+            # Show progress
+            self.analysis_results.setPlainText("Running comprehensive fault analysis...")
+            self.stage_results.setPlainText("Analyzing stage failures...")
+            self.trends_results.setPlainText("Analyzing trends...")
+            self.new_patterns_results.setPlainText("Detecting new patterns...")
+            self.performance_results.setPlainText("Analyzing performance correlation...")
+            self.predictive_results.setPlainText("Running predictive analysis...")
+            self.root_cause_results.setPlainText("Analyzing root causes...")
+            self.learning_results.setPlainText("Analyzing learning effectiveness...")
+            QApplication.processEvents()
             
-            if not missing_packages:
-                QMessageBox.information(self, "Missing Packages", "✅ All required packages are cached!")
-                return
+            # Run comprehensive analysis
+            analysis_result = self.fault_analyzer.analyze_comprehensive(days)
             
-            # Create detailed missing packages dialog
-            dialog = QDialog(self)
-            dialog.setWindowTitle("Missing Packages")
-            dialog.resize(600, 400)
-            
-            layout = QVBoxLayout()
-            
-            # Header
-            header_label = QLabel(f"⚠ {len(missing_packages)} packages still need to be downloaded:")
-            header_label.setStyleSheet("font-weight: bold; color: #d63384;")
-            layout.addWidget(header_label)
-            
-            # Missing packages table
-            table = QTableWidget()
-            table.setColumnCount(3)
-            table.setHorizontalHeaderLabels(["Package", "Version", "URL"])
-            table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-            table.setRowCount(len(missing_packages))
-            
-            for i, pkg in enumerate(missing_packages):
-                table.setItem(i, 0, QTableWidgetItem(pkg['name']))
-                table.setItem(i, 1, QTableWidgetItem(pkg['version']))
-                url_item = QTableWidgetItem(pkg['url'])
-                url_item.setToolTip(pkg['url'])
-                table.setItem(i, 2, url_item)
-            
-            layout.addWidget(table)
-            
-            # Action buttons
-            button_layout = QHBoxLayout()
-            
-            download_btn = QPushButton("Download Missing")
-            download_btn.clicked.connect(lambda: self.download_missing_from_dialog(dialog))
-            button_layout.addWidget(download_btn)
-            
-            export_btn = QPushButton("Export URLs")
-            export_btn.clicked.connect(lambda: self.export_missing_urls(missing_packages))
-            button_layout.addWidget(export_btn)
-            
-            button_layout.addStretch()
-            
-            close_btn = QPushButton("Close")
-            close_btn.clicked.connect(dialog.accept)
-            button_layout.addWidget(close_btn)
-            
-            layout.addLayout(button_layout)
-            dialog.setLayout(layout)
-            dialog.exec_()
+            # Format and display results in different tabs
+            if 'error' in analysis_result:
+                error_msg = f"❌ Analysis Error: {analysis_result['error']}"
+                self.analysis_results.setPlainText(error_msg)
+                self.stage_results.setPlainText(error_msg)
+                self.trends_results.setPlainText(error_msg)
+                self.new_patterns_results.setPlainText(error_msg)
+            else:
+                # Main analysis results
+                if 'failure_analysis' in analysis_result:
+                    main_text = self._format_fault_analysis_results(analysis_result['failure_analysis'])
+                    self.analysis_results.setPlainText(main_text)
+                
+                # Stage analysis results
+                if 'stage_analysis' in analysis_result:
+                    stage_text = self._format_stage_analysis_results(analysis_result['stage_analysis'])
+                    self.stage_results.setPlainText(stage_text)
+                
+                # Trends and success rates
+                if 'trend_analysis' in analysis_result and 'success_rates' in analysis_result:
+                    trends_text = self._format_trends_and_success_results(
+                        analysis_result['trend_analysis'], 
+                        analysis_result['success_rates']
+                    )
+                    self.trends_results.setPlainText(trends_text)
+                
+                # New patterns
+                if 'new_patterns' in analysis_result:
+                    patterns_text = self._format_new_patterns_results(analysis_result['new_patterns'])
+                    self.new_patterns_results.setPlainText(patterns_text)
+                
+                # Performance analysis
+                if 'performance_analysis' in analysis_result:
+                    performance_text = self._format_performance_results(analysis_result['performance_analysis'])
+                    self.performance_results.setPlainText(performance_text)
+                
+                # Predictive analysis for recent builds
+                predictive_text = self._format_predictive_analysis_results()
+                self.predictive_results.setPlainText(predictive_text)
+                
+                # Root cause analysis for recent failures
+                root_cause_text = self._format_root_cause_analysis_results()
+                self.root_cause_results.setPlainText(root_cause_text)
+                
+                # Learning insights
+                learning_text = self._format_learning_insights_results(days)
+                self.learning_results.setPlainText(learning_text)
             
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to get missing packages: {str(e)}")
+            error_msg = f"❌ Analysis failed: {str(e)}"
+            self.analysis_results.setPlainText(error_msg)
+            self.stage_results.setPlainText(error_msg)
+            self.trends_results.setPlainText(error_msg)
+            self.new_patterns_results.setPlainText(error_msg)
+            self.learning_results.setPlainText(error_msg)
     
-    def download_missing_from_dialog(self, dialog):
-        """Start downloading missing packages from the dialog"""
-        dialog.accept()
-        self.download_sources()
-    
-    def export_missing_urls(self, missing_packages):
-        """Export missing package URLs to a file"""
-        filename, _ = QFileDialog.getSaveFileName(self, "Save Missing Package URLs", "missing-packages.txt", "Text Files (*.txt)")
-        if filename:
-            try:
-                with open(filename, 'w') as f:
-                    f.write(f"# Missing LFS Packages ({len(missing_packages)} packages)\n")
-                    f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                    for pkg in missing_packages:
-                        f.write(f"# {pkg['name']} {pkg['version']}\n")
-                        f.write(f"{pkg['url']}\n\n")
+    def _format_fault_analysis_results(self, analysis_result: dict) -> str:
+        """Format fault analysis results for display"""
+        if not analysis_result or 'patterns' not in analysis_result:
+            return "No analysis results available"
+        
+        result_lines = []
+        result_lines.append(f"🔍 FAULT ANALYSIS RESULTS")
+        result_lines.append(f"📊 {analysis_result.get('summary', 'Analysis completed')}")
+        result_lines.append(f"📈 Total Failures: {analysis_result.get('total_failures', 0)}")
+        result_lines.append(f"🔬 Analyzed Builds: {analysis_result.get('analyzed_builds', 0)}")
+        result_lines.append("")
+        
+        patterns = analysis_result.get('patterns', [])
+        if patterns:
+            result_lines.append("🚨 DETECTED ISSUES:")
+            result_lines.append("=" * 60)
+            
+            for pattern in patterns:
+                severity_icon = {
+                    'Critical': '🔴',
+                    'High': '🟠', 
+                    'Medium': '🟡',
+                    'Low': '🟢'
+                }.get(pattern['severity'], '⚪')
                 
-                QMessageBox.information(self, "Export Complete", f"Missing package URLs saved to {filename}")
+                result_lines.append(f"{severity_icon} {pattern['name']} ({pattern['severity']})")
+                result_lines.append(f"   📊 Occurrences: {pattern['count']}")
+                result_lines.append(f"   📝 Description: {pattern['description']}")
+                result_lines.append(f"   💡 Solution: {pattern['solution']}")
+                
+                if pattern.get('auto_fix_command'):
+                    result_lines.append(f"   🔧 Auto-fix: {pattern['auto_fix_command']}")
+                
+                if pattern.get('most_common_stage'):
+                    result_lines.append(f"   🎯 Most Common Stage: {pattern['most_common_stage']}")
+                
+                if pattern.get('recent_builds'):
+                    recent_ids = [b['build_id'] for b in pattern['recent_builds'][-3:]]
+                    result_lines.append(f"   🕒 Recent Builds: {', '.join(recent_ids)}")
+                
+                result_lines.append("")
+        
+        recommendations = analysis_result.get('recommendations', [])
+        if recommendations:
+            result_lines.append("💡 RECOMMENDATIONS:")
+            result_lines.append("=" * 60)
+            for rec in recommendations:
+                result_lines.append(f"• {rec}")
+            result_lines.append("")
+        
+        return "\n".join(result_lines)
+    
+    def _format_stage_analysis_results(self, stage_analysis: dict) -> str:
+        """Format stage analysis results for display"""
+        if 'error' in stage_analysis:
+            return f"❌ Stage Analysis Error: {stage_analysis['error']}"
+        
+        result_lines = []
+        result_lines.append("🎯 STAGE FAILURE ANALYSIS")
+        result_lines.append("=" * 60)
+        
+        stages = stage_analysis.get('stages', [])
+        if stages:
+            result_lines.append(f"📊 Total Stage Failures: {stage_analysis.get('total_stage_failures', 0)}")
+            if stage_analysis.get('most_problematic'):
+                result_lines.append(f"⚠️  Most Problematic Stage: {stage_analysis['most_problematic']}")
+            result_lines.append("")
+            
+            result_lines.append("📈 STAGE BREAKDOWN:")
+            result_lines.append("-" * 60)
+            
+            for stage in stages:
+                failure_rate = stage['failure_rate']
+                rate_icon = "🔴" if failure_rate > 50 else "🟠" if failure_rate > 25 else "🟡" if failure_rate > 10 else "🟢"
+                
+                result_lines.append(f"{rate_icon} {stage['stage_name']}")
+                result_lines.append(f"   Failures: {stage['failure_count']} | Successes: {stage['success_count']}")
+                result_lines.append(f"   Failure Rate: {failure_rate}%")
+                if stage['avg_duration'] > 0:
+                    result_lines.append(f"   Avg Duration: {stage['avg_duration']} minutes")
+                result_lines.append("")
+        else:
+            result_lines.append("✅ No stage failures found in the specified period")
+        
+        return "\n".join(result_lines)
+    
+    def _format_trends_and_success_results(self, trend_analysis: dict, success_rates: dict) -> str:
+        """Format trends and success rate results for display"""
+        result_lines = []
+        
+        # Trends section
+        result_lines.append("📈 FAILURE TRENDS ANALYSIS")
+        result_lines.append("=" * 60)
+        
+        if 'error' in trend_analysis:
+            result_lines.append(f"❌ Trend Analysis Error: {trend_analysis['error']}")
+        else:
+            trend_direction = trend_analysis.get('trend_direction', 'unknown')
+            trend_percentage = trend_analysis.get('trend_percentage', 0)
+            
+            direction_icon = {
+                'improving': '📉 ✅',
+                'worsening': '📈 ⚠️',
+                'stable': '➡️ 📊'
+            }.get(trend_direction, '❓')
+            
+            result_lines.append(f"{direction_icon} Trend: {trend_direction.upper()} ({trend_percentage:+.1f}%)")
+            result_lines.append(f"Current Period: {trend_analysis.get('current_period_failures', 0)} failures")
+            result_lines.append(f"Previous Period: {trend_analysis.get('previous_period_failures', 0)} failures")
+            result_lines.append("")
+            
+            weekly_data = trend_analysis.get('weekly_breakdown', [])
+            if weekly_data:
+                result_lines.append("📅 WEEKLY BREAKDOWN:")
+                for week_data in weekly_data:
+                    result_lines.append(f"   {week_data['week']}: {week_data['failures']} failures")
+                result_lines.append("")
+        
+        # Success rates section
+        result_lines.append("✅ SUCCESS RATE ANALYSIS")
+        result_lines.append("=" * 60)
+        
+        if 'error' in success_rates:
+            result_lines.append(f"❌ Success Rate Error: {success_rates['error']}")
+        else:
+            overall_rate = success_rates.get('overall_success_rate', 0)
+            rate_icon = "🟢" if overall_rate > 80 else "🟡" if overall_rate > 60 else "🟠" if overall_rate > 40 else "🔴"
+            
+            result_lines.append(f"{rate_icon} Overall Success Rate: {overall_rate}%")
+            result_lines.append(f"📊 Total Builds: {success_rates.get('total_builds', 0)}")
+            result_lines.append(f"✅ Successful: {success_rates.get('successful_builds', 0)}")
+            result_lines.append("")
+            
+            if success_rates.get('most_reliable_stage'):
+                most_reliable = success_rates['most_reliable_stage']
+                result_lines.append(f"🏆 Most Reliable Stage: {most_reliable['stage_name']} ({most_reliable['success_rate']}%)")
+            
+            if success_rates.get('least_reliable_stage'):
+                least_reliable = success_rates['least_reliable_stage']
+                result_lines.append(f"⚠️  Least Reliable Stage: {least_reliable['stage_name']} ({least_reliable['success_rate']}%)")
+            
+            result_lines.append("")
+            
+            stage_rates = success_rates.get('stage_success_rates', [])
+            if stage_rates:
+                result_lines.append("📊 STAGE SUCCESS RATES:")
+                result_lines.append("-" * 60)
+                for stage in sorted(stage_rates, key=lambda x: x['success_rate'], reverse=True):
+                    rate = stage['success_rate']
+                    rate_icon = "🟢" if rate > 90 else "🟡" if rate > 75 else "🟠" if rate > 50 else "🔴"
+                    result_lines.append(f"{rate_icon} {stage['stage_name']}: {rate}% ({stage['successes']}/{stage['total_attempts']})")
+        
+        return "\n".join(result_lines)
+    
+    def _format_new_patterns_results(self, new_patterns: dict) -> str:
+        """Format new pattern detection results for display"""
+        result_lines = []
+        result_lines.append("🤖 NEW PATTERN DETECTION (ML Analysis)")
+        result_lines.append("=" * 60)
+        
+        if 'error' in new_patterns:
+            result_lines.append(f"❌ Pattern Detection Error: {new_patterns['error']}")
+            return "\n".join(result_lines)
+        
+        result_lines.append(f"📊 {new_patterns.get('summary', 'Analysis completed')}")
+        result_lines.append(f"🔍 Analyzed Lines: {new_patterns.get('total_analyzed_lines', 0)}")
+        result_lines.append("")
+        
+        patterns = new_patterns.get('new_patterns', [])
+        if patterns:
+            result_lines.append("🆕 SUGGESTED NEW PATTERNS:")
+            result_lines.append("-" * 60)
+            
+            for i, pattern in enumerate(patterns, 1):
+                severity_icon = {
+                    'Critical': '🔴',
+                    'High': '🟠',
+                    'Medium': '🟡', 
+                    'Low': '🟢'
+                }.get(pattern.get('suggested_severity', 'Medium'), '⚪')
+                
+                result_lines.append(f"{i}. {severity_icon} {pattern['suggested_name']} ({pattern.get('suggested_severity', 'Medium')})")
+                result_lines.append(f"   📊 Occurrences: {pattern['occurrences']}")
+                result_lines.append(f"   📝 Error Text: {pattern['error_text'][:100]}...")
+                result_lines.append(f"   🔍 Suggested Pattern: {pattern['suggested_pattern'][:80]}...")
+                result_lines.append("")
+        else:
+            result_lines.append("✅ No new patterns detected - existing patterns cover all common errors")
+        
+        result_lines.append("")
+        result_lines.append("💡 TIP: Use 'Export Patterns' to save current patterns, then 'Import Patterns' to load community contributions")
+        
+        return "\n".join(result_lines)
+    
+    def show_learning_insights(self):
+        """Show current learning insights and effectiveness"""
+        try:
+            days = int(self.days_combo.currentText())
+            self.learning_results.setPlainText("Analyzing learning effectiveness...")
+            QApplication.processEvents()
+            
+            learning_text = self._format_learning_insights_results(days)
+            self.learning_results.setPlainText(learning_text)
+            
+            # Switch to learning insights tab
+            self.analysis_results_tabs.setCurrentWidget(self.learning_results)
+            
+        except Exception as e:
+            self.learning_results.setPlainText(f"❌ Learning insights failed: {str(e)}")
+    
+    def _format_learning_insights_results(self, days: int = 30) -> str:
+        """Format learning insights and effectiveness results"""
+        result_lines = []
+        result_lines.append("🧠 AI LEARNING INSIGHTS & EFFECTIVENESS")
+        result_lines.append("=" * 60)
+        result_lines.append(f"Analysis Period: Last {days} days")
+        result_lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        result_lines.append("")
+        
+        try:
+            # Get guidance effectiveness from fault analyzer
+            effectiveness = self.fault_analyzer.get_guidance_effectiveness(days)
+            
+            if effectiveness and effectiveness.get('effectiveness_stats'):
+                result_lines.append("📊 INTELLIGENT GUIDANCE EFFECTIVENESS:")
+                result_lines.append("-" * 60)
+                
+                for stat in effectiveness['effectiveness_stats']:
+                    total_attempts = stat.get('total_attempts', 0)
+                    successful_attempts = stat.get('successful_attempts', 0)
+                    success_rate = (successful_attempts / total_attempts * 100) if total_attempts > 0 else 0
+                    avg_recovery_time = stat.get('avg_recovery_time', 0)
+                    
+                    success_icon = "🟢" if success_rate > 80 else "🟡" if success_rate > 60 else "🟠" if success_rate > 40 else "🔴"
+                    
+                    result_lines.append(f"{success_icon} {stat.get('recovery_type', 'Unknown')} Guidance:")
+                    result_lines.append(f"   Success Rate: {success_rate:.1f}% ({successful_attempts}/{total_attempts})")
+                    if avg_recovery_time > 0:
+                        result_lines.append(f"   Avg Recovery Time: {avg_recovery_time:.1f} seconds")
+                    result_lines.append("")
+                
+                # Top effective patterns
+                if effectiveness.get('top_effective_patterns'):
+                    result_lines.append("🏆 MOST EFFECTIVE PATTERNS:")
+                    result_lines.append("-" * 60)
+                    
+                    for pattern in effectiveness['top_effective_patterns']:
+                        pattern_name = pattern.get('pattern_name', 'Unknown')
+                        usage_count = pattern.get('usage_count', 0)
+                        success_rate = pattern.get('success_rate', 0)
+                        
+                        success_icon = "🟢" if success_rate > 80 else "🟡" if success_rate > 60 else "🟠"
+                        result_lines.append(f"{success_icon} {pattern_name}")
+                        result_lines.append(f"   Usage: {usage_count} times | Success: {success_rate:.1f}%")
+                        result_lines.append("")
+            else:
+                result_lines.append("📊 INTELLIGENT GUIDANCE STATUS:")
+                result_lines.append("-" * 60)
+                result_lines.append("🔄 Learning system is active and collecting data")
+                result_lines.append("📈 Effectiveness metrics will appear after guidance is used")
+                result_lines.append("")
+            
+            # Pattern learning progress
+            result_lines.append("🔍 PATTERN RECOGNITION LEARNING:")
+            result_lines.append("-" * 60)
+            
+            # Get pattern detection stats from database
+            try:
+                pattern_stats = self.db.execute_query("""
+                    SELECT 
+                        COUNT(DISTINCT pattern_id) as unique_patterns,
+                        COUNT(*) as total_detections,
+                        AVG(confidence_score) as avg_confidence,
+                        COUNT(CASE WHEN auto_fix_applied THEN 1 END) as auto_fixes_applied,
+                        COUNT(CASE WHEN fix_successful THEN 1 END) as successful_fixes
+                    FROM pattern_detections 
+                    WHERE detected_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                """, (days,), fetch=True)
+                
+                if pattern_stats and pattern_stats[0]['total_detections'] > 0:
+                    stats = pattern_stats[0]
+                    total_detections = stats['total_detections']
+                    unique_patterns = stats['unique_patterns']
+                    avg_confidence = stats['avg_confidence'] or 0
+                    auto_fixes = stats['auto_fixes_applied'] or 0
+                    successful_fixes = stats['successful_fixes'] or 0
+                    
+                    fix_success_rate = (successful_fixes / auto_fixes * 100) if auto_fixes > 0 else 0
+                    
+                    result_lines.append(f"🎯 Pattern Detections: {total_detections} (across {unique_patterns} unique patterns)")
+                    result_lines.append(f"🎯 Average Confidence: {avg_confidence:.1f}%")
+                    result_lines.append(f"🔧 Auto-fixes Applied: {auto_fixes}")
+                    result_lines.append(f"✅ Fix Success Rate: {fix_success_rate:.1f}% ({successful_fixes}/{auto_fixes})")
+                else:
+                    result_lines.append("🔄 Pattern detection system is active")
+                    result_lines.append("📊 Detection statistics will appear as patterns are found")
+                
             except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to save URLs: {str(e)}")
+                result_lines.append(f"⚠️ Pattern stats unavailable: {str(e)}")
+            
+            result_lines.append("")
+            
+            # Database learning metrics
+            result_lines.append("💾 DATABASE LEARNING METRICS:")
+            result_lines.append("-" * 60)
+            
+            try:
+                # Get recent data collection stats
+                db_stats = self.db.execute_query("""
+                    SELECT 
+                        (SELECT COUNT(*) FROM builds WHERE start_time >= DATE_SUB(NOW(), INTERVAL %s DAY)) as recent_builds,
+                        (SELECT COUNT(*) FROM build_documents WHERE created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)) as recent_docs,
+                        (SELECT COUNT(*) FROM system_metrics WHERE timestamp >= DATE_SUB(NOW(), INTERVAL %s DAY)) as system_metrics,
+                        (SELECT COUNT(*) FROM stage_performance WHERE end_time >= DATE_SUB(NOW(), INTERVAL %s DAY)) as performance_records
+                """, (days, days, days, days), fetch=True)
+                
+                if db_stats:
+                    stats = db_stats[0]
+                    result_lines.append(f"🏗️ Recent Builds Analyzed: {stats.get('recent_builds', 0)}")
+                    result_lines.append(f"📄 Documents Collected: {stats.get('recent_docs', 0)}")
+                    result_lines.append(f"📊 System Metrics Recorded: {stats.get('system_metrics', 0)}")
+                    result_lines.append(f"⚡ Performance Records: {stats.get('performance_records', 0)}")
+                
+            except Exception as e:
+                result_lines.append(f"⚠️ Database stats unavailable: {str(e)}")
+            
+            result_lines.append("")
+            
+            # Learning recommendations
+            result_lines.append("💡 LEARNING SYSTEM RECOMMENDATIONS:")
+            result_lines.append("-" * 60)
+            
+            # Check if we have enough data for good learning
+            try:
+                build_count = self.db.execute_query(
+                    "SELECT COUNT(*) as count FROM builds WHERE start_time >= DATE_SUB(NOW(), INTERVAL %s DAY)",
+                    (days,), fetch=True
+                )[0]['count']
+                
+                if build_count < 5:
+                    result_lines.append("📈 Run more builds to improve learning accuracy")
+                    result_lines.append("🎯 Minimum 5-10 builds recommended for meaningful insights")
+                elif build_count < 20:
+                    result_lines.append("📊 Good data collection progress")
+                    result_lines.append("🎯 Continue building to enhance pattern recognition")
+                else:
+                    result_lines.append("✅ Excellent data collection for robust learning")
+                    result_lines.append("🧠 System has sufficient data for accurate predictions")
+                
+                # Check for pattern diversity
+                failure_count = self.db.execute_query(
+                    "SELECT COUNT(*) as count FROM builds WHERE status IN ('failed', 'cancelled') AND start_time >= DATE_SUB(NOW(), INTERVAL %s DAY)",
+                    (days,), fetch=True
+                )[0]['count']
+                
+                if failure_count > 0:
+                    result_lines.append(f"🔍 {failure_count} failures analyzed for pattern learning")
+                    result_lines.append("📚 System is learning from both successes and failures")
+                else:
+                    result_lines.append("✅ No recent failures - system learning from successful patterns")
+                
+            except Exception as e:
+                result_lines.append(f"⚠️ Unable to generate recommendations: {str(e)}")
+            
+            result_lines.append("")
+            result_lines.append("🔄 CONTINUOUS LEARNING FEATURES:")
+            result_lines.append("-" * 60)
+            result_lines.append("• 🎯 Real-time pattern detection during builds")
+            result_lines.append("• 📊 Historical success rate tracking")
+            result_lines.append("• 🔧 Auto-fix command effectiveness monitoring")
+            result_lines.append("• 🧠 Machine learning pattern recognition")
+            result_lines.append("• 📈 Predictive failure analysis")
+            result_lines.append("• 🔍 Root cause correlation analysis")
+            result_lines.append("• 💾 Comprehensive data retention for long-term learning")
+            result_lines.append("")
+            result_lines.append("💡 TIP: The system gets smarter with each build attempt!")
+            
+        except Exception as e:
+            result_lines.append(f"❌ Error generating learning insights: {str(e)}")
+            result_lines.append("")
+            result_lines.append("🔄 Learning system is active but insights are temporarily unavailable")
+        
+        return "\n".join(result_lines)
 
 def main():
     app = QApplication(sys.argv)

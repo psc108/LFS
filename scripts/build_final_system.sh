@@ -16,26 +16,26 @@ cd /sources
 
 # Build Man-pages
 echo "Building Man-pages..."
-tar -xf man-pages-6.05.01.tar.xz
-cd man-pages-6.05.01
+tar -xf man-pages-6.15.tar.xz
+cd man-pages-6.15
 make prefix=/usr install
 cd /sources
-rm -rf man-pages-6.05.01
+rm -rf man-pages-6.15
 
 # Build Iana-Etc
 echo "Building Iana-Etc..."
-tar -xf iana-etc-20230810.tar.gz
-cd iana-etc-20230810
+tar -xf iana-etc-20250807.tar.gz
+cd iana-etc-20250807
 cp services protocols /etc
 cd /sources
-rm -rf iana-etc-20230810
+rm -rf iana-etc-20250807
 
 # Build Glibc (final)
 echo "Building Glibc (final)..."
-tar -xf glibc-2.38.tar.xz
-cd glibc-2.38
+tar -xf glibc-2.42.tar.xz
+cd glibc-2.42
 
-patch -Np1 -i ../glibc-2.38-fhs-1.patch || echo "Patch not found, continuing..."
+patch -Np1 -i ../glibc-2.42-fhs-1.patch || echo "Patch not found, continuing..."
 
 mkdir -v build
 cd build
@@ -74,15 +74,15 @@ rpc: files
 EOF
 
 # Add time zone data
-tar -xf ../../tzdata2023c.tar.gz || echo "tzdata not found, skipping..."
+tar -xf ../../tzdata2025b.tar.gz || echo "tzdata not found, skipping..."
 
 cd /sources
-rm -rf glibc-2.38
+rm -rf glibc-2.42
 
 # Build Zlib
 echo "Building Zlib..."
-tar -xf zlib-1.2.13.tar.xz
-cd zlib-1.2.13
+tar -xf zlib-1.3.1.tar.gz
+cd zlib-1.3.1
 
 ./configure --prefix=/usr
 make -j$(nproc)
@@ -90,7 +90,7 @@ make install
 rm -fv /usr/lib/libz.a
 
 cd /sources
-rm -rf zlib-1.2.13
+rm -rf zlib-1.3.1
 
 # Build Bzip2
 echo "Building Bzip2..."
@@ -115,35 +115,35 @@ rm -rf bzip2-1.0.8
 
 # Build Xz
 echo "Building Xz..."
-tar -xf xz-5.4.4.tar.xz
-cd xz-5.4.4
+tar -xf xz-5.8.1.tar.xz
+cd xz-5.8.1
 
 ./configure --prefix=/usr    \
             --disable-static \
-            --docdir=/usr/share/doc/xz-5.4.4
+            --docdir=/usr/share/doc/xz-5.8.1
 
 make -j$(nproc)
 make install
 
 cd /sources
-rm -rf xz-5.4.4
+rm -rf xz-5.8.1
 
 # Build File (final)
 echo "Building File (final)..."
-tar -xf file-5.45.tar.gz
-cd file-5.45
+tar -xf file-5.46.tar.gz
+cd file-5.46
 
 ./configure --prefix=/usr
 make -j$(nproc)
 make install
 
 cd /sources
-rm -rf file-5.45
+rm -rf file-5.46
 
 # Build Readline
 echo "Building Readline..."
-tar -xf readline-8.2.tar.gz
-cd readline-8.2
+tar -xf readline-8.3.tar.gz
+cd readline-8.3
 
 sed -i '/MV.*old/d' Makefile.in
 sed -i '/{OLDSUFF}/c:' support/shlib-install
@@ -151,13 +151,13 @@ sed -i '/{OLDSUFF}/c:' support/shlib-install
 ./configure --prefix=/usr    \
             --disable-static \
             --with-curses    \
-            --docdir=/usr/share/doc/readline-8.2
+            --docdir=/usr/share/doc/readline-8.3
 
 make SHLIB_LIBS="-lncursesw" -j$(nproc)
 make SHLIB_LIBS="-lncursesw" install
 
 cd /sources
-rm -rf readline-8.2
+rm -rf readline-8.3
 
 echo "✓ Final system build completed"
 echo "Core system packages are installed"

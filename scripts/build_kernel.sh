@@ -10,8 +10,8 @@ cd /sources
 
 # Extract kernel source
 echo "Extracting Linux kernel..."
-tar -xf linux-6.4.12.tar.xz
-cd linux-6.4.12
+tar -xf linux-6.16.1.tar.xz
+cd linux-6.16.1
 
 # Clean kernel source
 make mrproper
@@ -75,13 +75,13 @@ make modules_install
 
 # Install kernel
 echo "Installing kernel..."
-cp -iv arch/x86/boot/bzImage /boot/vmlinuz-6.4.12-lfs-12.0
-cp -iv System.map /boot/System.map-6.4.12
-cp -iv .config /boot/config-6.4.12
+cp -iv arch/x86/boot/bzImage /boot/vmlinuz-6.16.1-lfs-12.4
+cp -iv System.map /boot/System.map-6.16.1
+cp -iv .config /boot/config-6.16.1
 
 # Create symlinks
-ln -sfv vmlinuz-6.4.12-lfs-12.0 /boot/vmlinuz
-ln -sfv System.map-6.4.12 /boot/System.map
+ln -sfv vmlinuz-6.16.1-lfs-12.4 /boot/vmlinuz
+ln -sfv System.map-6.16.1 /boot/System.map
 
 # Install kernel headers for userspace
 echo "Installing kernel headers..."
@@ -121,13 +121,13 @@ EOF
 chmod +x init
 
 # Create initramfs archive
-find . | cpio -o -H newc | gzip > /boot/initramfs-6.4.12-lfs-12.0.img
-ln -sfv initramfs-6.4.12-lfs-12.0.img /boot/initramfs.img
+find . | cpio -o -H newc | gzip > /boot/initramfs-6.16.1-lfs-12.4.img
+ln -sfv initramfs-6.16.1-lfs-12.4.img /boot/initramfs.img
 
 cd /sources
-rm -rf linux-6.4.12
+rm -rf linux-6.16.1
 
 echo "✓ Kernel build completed"
-echo "Kernel: /boot/vmlinuz-6.4.12-lfs-12.0"
-echo "Modules: /lib/modules/6.4.12"
-echo "Initramfs: /boot/initramfs-6.4.12-lfs-12.0.img"
+echo "Kernel: /boot/vmlinuz-6.16.1-lfs-12.4"
+echo "Modules: /lib/modules/6.16.1"
+echo "Initramfs: /boot/initramfs-6.16.1-lfs-12.4.img"

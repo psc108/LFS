@@ -7,6 +7,8 @@ from pathlib import Path
 import yaml
 import threading
 import queue
+import os
+import tempfile
 
 from ..database.db_manager import DatabaseManager
 from .downloader import LFSDownloader
@@ -33,11 +35,13 @@ class BuildEngine:
         self.current_build = None
         self.build_thread = None
         self.build_cancelled = False
+        self.sudo_password = None
         self.callbacks = {
             'stage_start': [],
             'stage_complete': [],
             'build_complete': [],
-            'build_error': []
+            'build_error': [],
+            'sudo_required': []
         }
     
     def register_callback(self, event: str, callback: Callable):
@@ -69,7 +73,7 @@ class BuildEngine:
     def create_default_lfs_config(self, output_path: str):
         default_config = {
             'name': 'Linux From Scratch Build',
-            'version': '12.0',
+            'version': '12.4',
             'stages': [
                 {
                     'name': 'prepare_host',
@@ -186,6 +190,9 @@ class BuildEngine:
         try:
             if not self.current_build:
                 return
+            
+            # Setup LFS permissions before starting build
+            self._setup_lfs_permissions(build_id)
                 
             stages_list = sorted(self.stages.values(), key=lambda x: x.order)
             
@@ -206,8 +213,7 @@ class BuildEngine:
                     self.emit_event('build_error', {'build_id': build_id, 'stage': stage.name})
                     return
                 
-                if 'completed_stages' in self.current_build:
-                    self.current_build['completed_stages'] += 1
+                self.current_build['completed_stages'] = self.current_build.get('completed_stages', 0) + 1
             
             self.db.update_build_status(build_id, 'success', self.current_build.get('completed_stages', 0))
             self.emit_event('build_complete', {'build_id': build_id, 'status': 'success'})
@@ -234,23 +240,54 @@ class BuildEngine:
     
     def _execute_stage(self, build_id: str, stage: BuildStage):
         stage.status = 'running'
-        self.db.add_stage_log(build_id, stage.name, stage.order, 'running')
+        self.db.add_stage_log(build_id, stage.name, 'running')
         self.emit_event('stage_start', {'build_id': build_id, 'stage': stage.name})
         
+        # Collect warnings for this stage
+        stage_warnings = []
+        
         try:
+            # Modify command to use sudo with password if needed
+            command = stage.command
+            if self.sudo_password:
+                # Set SUDO_ASKPASS environment variable and use -A flag
+                import tempfile
+                import os
+                
+                # Create a temporary askpass script
+                askpass_script = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh')
+                askpass_script.write(f'#!/bin/bash\necho "{self.sudo_password}"\n')
+                askpass_script.close()
+                os.chmod(askpass_script.name, 0o755)
+                
+                # Set environment variables for sudo
+                env = os.environ.copy()
+                env['SUDO_ASKPASS'] = askpass_script.name
+                
+                # Replace sudo commands to use askpass
+                import re
+                command = re.sub(r'sudo\s+', 'sudo -A ', command)
+                
+                # Store askpass script path for cleanup
+                self._current_askpass_script = askpass_script.name
+            else:
+                env = None
+            
             process = subprocess.Popen(
-                stage.command,
+                command,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
+                universal_newlines=True,
+                env=env
             )
             
-            # Read output in real-time and update database
+            # Read output in real-time with periodic logging
             stdout_lines = []
             stderr_lines = []
+            line_count = 0
             
             while True:
                 stdout_line = process.stdout.readline()
@@ -258,15 +295,39 @@ class BuildEngine:
                 
                 if stdout_line:
                     stdout_lines.append(stdout_line)
-                    # Update database with partial output for live viewing
-                    self.db.add_stage_log(build_id, stage.name, stage.order, 'running', 
-                                        ''.join(stdout_lines), ''.join(stderr_lines))
+                    line_count += 1
+                    # Log progress every 50 lines and show key progress in CLI
+                    if line_count % 50 == 0:
+                        partial_output = ''.join(stdout_lines[-10:])  # Last 10 lines
+                        # Show progress indicators in CLI
+                        recent_line = stdout_lines[-1].strip() if stdout_lines else ''
+                        if recent_line and any(word in recent_line.lower() for word in ['✓', 'completed', 'installing', 'building', 'configuring', 'extracting']):
+                            print(f"📋 Build Progress: {recent_line}")
+                        else:
+                            # Show periodic "still running" indicator
+                            print(f"🔄 Stage {stage.name} running... ({line_count} lines processed)")
+                        
+                        self.db.add_document(
+                            build_id, 'log', f'Stage Progress: {stage.name}',
+                            f"Lines processed: {line_count}\n\nRecent output:\n{partial_output}",
+                            {'stage_order': stage.order, 'progress': True, 'line_count': line_count}
+                        )
                 
                 if stderr_line:
                     stderr_lines.append(stderr_line)
-                    # Update database with partial output for live viewing
-                    self.db.add_stage_log(build_id, stage.name, stage.order, 'running', 
-                                        ''.join(stdout_lines), ''.join(stderr_lines))
+                    line_stripped = stderr_line.strip()
+                    if line_stripped:
+                        # Check if it's a warning or info message
+                        if any(word in stderr_line.lower() for word in ['warning:', 'note:', 'info:', 'makeinfo is missing', 'documentation will not be built']):
+                            stage_warnings.append(line_stripped)
+                        else:
+                            # Log actual errors immediately
+                            print(f"🚨 Build Error: {line_stripped}")  # Show in CLI
+                            self.db.add_document(
+                                build_id, 'log', f'Stage Error Output: {stage.name}',
+                                f"Error line: {line_stripped}",
+                                {'stage_order': stage.order, 'error_line': True}
+                            )
                 
                 if process.poll() is not None:
                     break
@@ -281,32 +342,77 @@ class BuildEngine:
             stdout = ''.join(stdout_lines)
             stderr = ''.join(stderr_lines)
             
+            # Log final line count and show completion status
+            if line_count > 0:
+                print(f"📊 Stage {stage.name} generated {line_count} lines of output")
+                self.db.add_document(
+                    build_id, 'log', f'Stage Output Summary: {stage.name}',
+                    f"Total output lines: {line_count}\nStdout size: {len(stdout)} chars\nStderr size: {len(stderr)} chars",
+                    {'stage_order': stage.order, 'summary': True, 'total_lines': line_count}
+                )
+            
             stage.output = stdout
             stage.error = stderr
             
+            # Cleanup askpass script if it was created
+            if hasattr(self, '_current_askpass_script'):
+                try:
+                    os.unlink(self._current_askpass_script)
+                    delattr(self, '_current_askpass_script')
+                except:
+                    pass
+            
             if process.returncode == 0:
                 stage.status = 'success'
-                self.db.add_stage_log(build_id, stage.name, stage.order, 'success', stdout, stderr)
+                print(f"✓ Stage {stage.name} completed successfully")
+                self.db.add_stage_log(build_id, stage.name, 'success', stdout)
                 
                 self.db.add_document(
                     build_id, 'log', f'Stage: {stage.name}', 
                     f"Command: {stage.command}\n\nOutput:\n{stdout}\n\nErrors:\n{stderr}",
                     {'stage_order': stage.order, 'return_code': process.returncode}
                 )
+                
+                # Save warnings document if any warnings were collected
+                if stage_warnings:
+                    warnings_content = f"Warnings collected during {stage.name} stage:\n\n"
+                    warnings_content += "\n".join(f"• {warning}" for warning in stage_warnings)
+                    warnings_content += f"\n\nTotal warnings: {len(stage_warnings)}"
+                    
+                    self.db.add_document(
+                        build_id, 'log', f'Stage Warnings: {stage.name}',
+                        warnings_content,
+                        {'stage_order': stage.order, 'warning_count': len(stage_warnings), 'warnings': True}
+                    )
             else:
                 stage.status = 'failed'
-                self.db.add_stage_log(build_id, stage.name, stage.order, 'failed', stdout, stderr)
+                print(f"❌ Stage {stage.name} failed with return code {process.returncode}")
+                if stderr.strip():
+                    print(f"Error details: {stderr.strip()[:200]}...")  # Show first 200 chars
+                self.db.add_stage_log(build_id, stage.name, 'failed', stdout)
                 
                 self.db.add_document(
                     build_id, 'error', f'Stage Failed: {stage.name}', 
                     f"Command: {stage.command}\n\nOutput:\n{stdout}\n\nErrors:\n{stderr}",
                     {'stage_order': stage.order, 'return_code': process.returncode}
                 )
+                
+                # Save warnings document even for failed stages
+                if stage_warnings:
+                    warnings_content = f"Warnings collected during {stage.name} stage (before failure):\n\n"
+                    warnings_content += "\n".join(f"• {warning}" for warning in stage_warnings)
+                    warnings_content += f"\n\nTotal warnings: {len(stage_warnings)}"
+                    
+                    self.db.add_document(
+                        build_id, 'log', f'Stage Warnings: {stage.name}',
+                        warnings_content,
+                        {'stage_order': stage.order, 'warning_count': len(stage_warnings), 'warnings': True}
+                    )
         
         except Exception as e:
             stage.status = 'failed'
             stage.error = str(e)
-            self.db.add_stage_log(build_id, stage.name, stage.order, 'failed', "", str(e))
+            self.db.add_stage_log(build_id, stage.name, 'failed', str(e))
         
         self.emit_event('stage_complete', {
             'build_id': build_id, 
@@ -317,7 +423,11 @@ class BuildEngine:
     def _fail_stage(self, build_id: str, stage: BuildStage, reason: str):
         stage.status = 'failed'
         stage.error = reason
-        self.db.add_stage_log(build_id, stage.name, stage.order, 'failed', "", reason)
+        self.db.add_stage_log(build_id, stage.name, 'failed', reason)
+    
+    def set_sudo_password(self, password: str):
+        """Set sudo password for build operations"""
+        self.sudo_password = password
     
     def rollback_stage(self, build_id: str, stage_name: str) -> bool:
         if stage_name not in self.stages:
@@ -375,3 +485,80 @@ class BuildEngine:
             return {"downloaded": [], "missing": [], "corrupted": []}
         
         return self.downloader.get_download_status()
+    
+    def _setup_lfs_permissions(self, build_id: str):
+        """Setup LFS directory permissions before build"""
+        try:
+            if not self.sudo_password:
+                self.db.add_document(
+                    build_id, 'log', 'LFS Permissions Setup Skipped',
+                    'No sudo password available - skipping permissions setup',
+                    {'setup': True, 'skipped': True}
+                )
+                return
+            
+            # Create askpass script
+            askpass_script = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh')
+            askpass_script.write(f'#!/bin/bash\necho "{self.sudo_password}"\n')
+            askpass_script.close()
+            os.chmod(askpass_script.name, 0o755)
+            
+            env = os.environ.copy()
+            env['SUDO_ASKPASS'] = askpass_script.name
+            
+            try:
+                # Setup LFS directories directly
+                commands = [
+                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/sources'],
+                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/tools'],
+                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/usr'],
+                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/lib'],
+                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/lib64'],
+                    ['sudo', '-A', 'chmod', '777', '/mnt/lfs/sources'],
+                    ['sudo', '-A', 'chmod', '777', '/mnt/lfs/tools'],
+                    ['sudo', '-A', 'chmod', '777', '/mnt/lfs/usr'],
+                    ['sudo', '-A', 'chmod', '755', '/mnt/lfs/lib'],
+                    ['sudo', '-A', 'chmod', '755', '/mnt/lfs/lib64'],
+                    ['sudo', '-A', 'chown', '-R', f'{os.getenv("USER", "scottp")}:{os.getenv("USER", "scottp")}', '/mnt/lfs/sources/']
+                ]
+                
+                output_lines = []
+                for cmd in commands:
+                    try:
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            env=env,
+                            timeout=30
+                        )
+                        output_lines.append(f"Command: {' '.join(cmd)}")
+                        output_lines.append(f"Return code: {result.returncode}")
+                        if result.stdout:
+                            output_lines.append(f"Output: {result.stdout}")
+                        if result.stderr:
+                            output_lines.append(f"Errors: {result.stderr}")
+                        output_lines.append("")
+                    except subprocess.TimeoutExpired:
+                        output_lines.append(f"Command timed out: {' '.join(cmd)}")
+                    except Exception as e:
+                        output_lines.append(f"Command failed: {' '.join(cmd)} - {str(e)}")
+                
+                self.db.add_document(
+                    build_id, 'log', 'LFS Permissions Setup',
+                    '\n'.join(output_lines),
+                    {'setup': True, 'return_code': 0}
+                )
+                
+            finally:
+                # Cleanup askpass script
+                try:
+                    os.unlink(askpass_script.name)
+                except:
+                    pass
+            
+        except Exception as e:
+            self.db.add_document(
+                build_id, 'error', 'LFS Permissions Setup Failed',
+                str(e), {'setup': True}
+            )

@@ -15,8 +15,8 @@ cd $LFS/sources
 
 # Build Libstdc++ from GCC
 echo "Building Libstdc++..."
-tar -xf gcc-13.2.0.tar.xz
-cd gcc-13.2.0
+tar -xf gcc-15.2.0.tar.xz
+cd gcc-15.2.0
 
 mkdir -v build
 cd build
@@ -28,19 +28,19 @@ cd build
     --disable-multilib              \
     --disable-nls                   \
     --disable-libstdcxx-pch         \
-    --with-gxx-include-dir=/tools/$LFS_TGT/include/c++/13.2.0
+    --with-gxx-include-dir=/tools/$LFS_TGT/include/c++/15.2.0
 
 make -j$(nproc)
 make DESTDIR=$LFS install
 rm -v $LFS/usr/lib/lib{stdc++,stdc++fs,supc++}.la
 
 cd $LFS/sources
-rm -rf gcc-13.2.0
+rm -rf gcc-15.2.0
 
 # Build M4
 echo "Building M4..."
-tar -xf m4-1.4.19.tar.xz
-cd m4-1.4.19
+tar -xf m4-1.4.20.tar.xz
+cd m4-1.4.20
 
 ./configure --prefix=/usr   \
             --host=$LFS_TGT \
@@ -50,12 +50,12 @@ make -j$(nproc)
 make DESTDIR=$LFS install
 
 cd $LFS/sources
-rm -rf m4-1.4.19
+rm -rf m4-1.4.20
 
 # Build Ncurses
 echo "Building Ncurses..."
-tar -xf ncurses-6.4.tar.gz
-cd ncurses-6.4
+tar -xf ncurses-6.5-20250809.tgz
+cd ncurses-6.5-20250809
 
 sed -i s/mawk// configure
 
@@ -84,12 +84,12 @@ make DESTDIR=$LFS TIC_PATH=$(pwd)/build/progs/tic install
 echo "INPUT(-lncursesw)" > $LFS/usr/lib/libncurses.so
 
 cd $LFS/sources
-rm -rf ncurses-6.4
+rm -rf ncurses-6.5-20250809
 
 # Build Bash
 echo "Building Bash..."
-tar -xf bash-5.2.15.tar.gz
-cd bash-5.2.15
+tar -xf bash-5.3.tar.gz
+cd bash-5.3
 
 ./configure --prefix=/usr                      \
             --build=$(sh support/config.guess) \
@@ -101,12 +101,12 @@ make DESTDIR=$LFS install
 ln -sv bash $LFS/bin/sh
 
 cd $LFS/sources
-rm -rf bash-5.2.15
+rm -rf bash-5.3
 
 # Build Coreutils
 echo "Building Coreutils..."
-tar -xf coreutils-9.3.tar.xz
-cd coreutils-9.3
+tar -xf coreutils-9.7.tar.xz
+cd coreutils-9.7
 
 ./configure --prefix=/usr                     \
             --host=$LFS_TGT                   \
@@ -123,12 +123,12 @@ mv -v $LFS/usr/share/man/man1/chroot.1 $LFS/usr/share/man/man8/chroot.8
 sed -i 's/"1"/"8"/'                    $LFS/usr/share/man/man8/chroot.8
 
 cd $LFS/sources
-rm -rf coreutils-9.3
+rm -rf coreutils-9.7
 
 # Build Diffutils
 echo "Building Diffutils..."
-tar -xf diffutils-3.10.tar.xz
-cd diffutils-3.10
+tar -xf diffutils-3.12.tar.xz
+cd diffutils-3.12
 
 ./configure --prefix=/usr   \
             --host=$LFS_TGT \
@@ -138,12 +138,12 @@ make -j$(nproc)
 make DESTDIR=$LFS install
 
 cd $LFS/sources
-rm -rf diffutils-3.10
+rm -rf diffutils-3.12
 
 # Build File
 echo "Building File..."
-tar -xf file-5.45.tar.gz
-cd file-5.45
+tar -xf file-5.46.tar.gz
+cd file-5.46
 
 mkdir build
 pushd build
@@ -161,7 +161,7 @@ make DESTDIR=$LFS install
 rm -v $LFS/usr/lib/libmagic.la
 
 cd $LFS/sources
-rm -rf file-5.45
+rm -rf file-5.46
 
 echo "✓ Temporary system build completed"
 echo "Core utilities are ready for chroot environment"
