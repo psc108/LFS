@@ -9,10 +9,16 @@ from typing import Dict, List, Optional
 import git
 
 from ..database.db_manager import DatabaseManager
+from ..config.settings_manager import SettingsManager
 
 class RepositoryManager:
-    def __init__(self, db_manager: DatabaseManager, repo_path: str = "/tmp/lfs_repo"):
+    def __init__(self, db_manager: DatabaseManager, repo_path: str = None):
         self.db = db_manager
+        self.settings = SettingsManager()
+        
+        if repo_path is None:
+            repo_path = self.settings.get_repository_path()
+        
         self.repo_path = Path(repo_path)
         self.repo_path.mkdir(parents=True, exist_ok=True)
         self.git_repo = None

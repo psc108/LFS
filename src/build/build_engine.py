@@ -9,6 +9,7 @@ import threading
 import queue
 
 from ..database.db_manager import DatabaseManager
+from .downloader import LFSDownloader
 
 class BuildStage:
     def __init__(self, name: str, order: int, command: str, 
@@ -23,12 +24,15 @@ class BuildStage:
         self.error = ""
 
 class BuildEngine:
-    def __init__(self, db_manager: DatabaseManager):
+    def __init__(self, db_manager: DatabaseManager, repo_manager=None):
         self.db = db_manager
+        self.repo = repo_manager
+        self.downloader = LFSDownloader(repo_manager, db_manager) if repo_manager else None
         self.stages = {}
         self.build_queue = queue.Queue()
         self.current_build = None
         self.build_thread = None
+        self.build_cancelled = False
         self.callbacks = {
             'stage_start': [],
             'stage_complete': [],
@@ -72,14 +76,14 @@ class BuildEngine:
                     'order': 1,
                     'command': 'bash scripts/prepare_host.sh',
                     'dependencies': [],
-                    'rollback_command': 'bash scripts/cleanup_host.sh'
+                    'rollback_command': 'echo "Host preparation rollback"'
                 },
                 {
                     'name': 'create_partition',
                     'order': 2,
                     'command': 'bash scripts/create_partition.sh',
                     'dependencies': ['prepare_host'],
-                    'rollback_command': 'bash scripts/remove_partition.sh'
+                    'rollback_command': 'sudo umount /mnt/lfs || true'
                 },
                 {
                     'name': 'download_sources',
@@ -96,32 +100,46 @@ class BuildEngine:
                     'rollback_command': 'rm -rf /mnt/lfs/tools/*'
                 },
                 {
-                    'name': 'build_system',
+                    'name': 'build_temp_system',
                     'order': 5,
-                    'command': 'bash scripts/build_system.sh',
+                    'command': 'bash scripts/build_temp_system.sh',
                     'dependencies': ['build_toolchain'],
-                    'rollback_command': 'bash scripts/cleanup_system.sh'
+                    'rollback_command': 'rm -rf /mnt/lfs/usr/*'
+                },
+                {
+                    'name': 'enter_chroot',
+                    'order': 6,
+                    'command': 'bash scripts/enter_chroot.sh',
+                    'dependencies': ['build_temp_system'],
+                    'rollback_command': 'sudo umount /mnt/lfs/{dev/pts,dev,proc,sys,run} || true'
+                },
+                {
+                    'name': 'build_final_system',
+                    'order': 7,
+                    'command': 'bash scripts/build_final_system.sh',
+                    'dependencies': ['enter_chroot'],
+                    'rollback_command': 'echo "Final system rollback"'
                 },
                 {
                     'name': 'configure_system',
-                    'order': 6,
+                    'order': 8,
                     'command': 'bash scripts/configure_system.sh',
-                    'dependencies': ['build_system'],
-                    'rollback_command': 'bash scripts/reset_config.sh'
+                    'dependencies': ['build_final_system'],
+                    'rollback_command': 'echo "System config rollback"'
                 },
                 {
                     'name': 'build_kernel',
-                    'order': 7,
+                    'order': 9,
                     'command': 'bash scripts/build_kernel.sh',
                     'dependencies': ['configure_system'],
                     'rollback_command': 'rm -rf /mnt/lfs/boot/*'
                 },
                 {
-                    'name': 'finalize_system',
-                    'order': 8,
-                    'command': 'bash scripts/finalize_system.sh',
+                    'name': 'install_bootloader',
+                    'order': 10,
+                    'command': 'bash scripts/install_bootloader.sh',
                     'dependencies': ['build_kernel'],
-                    'rollback_command': 'bash scripts/cleanup_final.sh'
+                    'rollback_command': 'rm -rf /mnt/lfs/boot/grub'
                 }
             ]
         }
@@ -158,39 +176,53 @@ class BuildEngine:
         if self.build_thread and self.build_thread.is_alive():
             raise Exception("Another build is already running")
         
-        self.build_thread = threading.Thread(target=self._execute_build, args=(build_id,))
+        self.build_cancelled = False
+        self.build_thread = threading.Thread(target=self._execute_build, args=(build_id,), daemon=True)
         self.build_thread.start()
         
         return build_id
     
     def _execute_build(self, build_id: str):
         try:
+            if not self.current_build:
+                return
+                
             stages_list = sorted(self.stages.values(), key=lambda x: x.order)
             
             for stage in stages_list:
+                if self.build_cancelled:
+                    self.db.update_build_status(build_id, 'cancelled', self.current_build.get('completed_stages', 0))
+                    return
+                
                 if not self._check_dependencies(stage):
                     self._fail_stage(build_id, stage, "Dependencies not met")
                     continue
                 
                 self._execute_stage(build_id, stage)
                 
-                if stage.status == 'failed':
-                    self.db.update_build_status(build_id, 'failed', self.current_build['completed_stages'])
+                if stage.status == 'failed' or self.build_cancelled:
+                    status = 'cancelled' if self.build_cancelled else 'failed'
+                    self.db.update_build_status(build_id, status, self.current_build.get('completed_stages', 0))
                     self.emit_event('build_error', {'build_id': build_id, 'stage': stage.name})
                     return
                 
-                self.current_build['completed_stages'] += 1
+                if 'completed_stages' in self.current_build:
+                    self.current_build['completed_stages'] += 1
             
-            self.db.update_build_status(build_id, 'success', self.current_build['completed_stages'])
+            self.db.update_build_status(build_id, 'success', self.current_build.get('completed_stages', 0))
             self.emit_event('build_complete', {'build_id': build_id, 'status': 'success'})
             
         except Exception as e:
-            self.db.update_build_status(build_id, 'failed', self.current_build['completed_stages'])
-            self.db.add_document(
-                build_id, 'error', 'Build Exception', 
-                str(e), {'exception_type': type(e).__name__}
-            )
-            self.emit_event('build_error', {'build_id': build_id, 'error': str(e)})
+            print(f"Build execution error: {e}")
+            try:
+                self.db.update_build_status(build_id, 'failed', self.current_build.get('completed_stages', 0) if self.current_build else 0)
+                self.db.add_document(
+                    build_id, 'error', 'Build Exception', 
+                    str(e), {'exception_type': type(e).__name__}
+                )
+                self.emit_event('build_error', {'build_id': build_id, 'error': str(e)})
+            except Exception as db_error:
+                print(f"Database error during exception handling: {db_error}")
     
     def _check_dependencies(self, stage: BuildStage) -> bool:
         for dep_name in stage.dependencies:
@@ -216,7 +248,38 @@ class BuildEngine:
                 universal_newlines=True
             )
             
-            stdout, stderr = process.communicate()
+            # Read output in real-time and update database
+            stdout_lines = []
+            stderr_lines = []
+            
+            while True:
+                stdout_line = process.stdout.readline()
+                stderr_line = process.stderr.readline()
+                
+                if stdout_line:
+                    stdout_lines.append(stdout_line)
+                    # Update database with partial output for live viewing
+                    self.db.add_stage_log(build_id, stage.name, stage.order, 'running', 
+                                        ''.join(stdout_lines), ''.join(stderr_lines))
+                
+                if stderr_line:
+                    stderr_lines.append(stderr_line)
+                    # Update database with partial output for live viewing
+                    self.db.add_stage_log(build_id, stage.name, stage.order, 'running', 
+                                        ''.join(stdout_lines), ''.join(stderr_lines))
+                
+                if process.poll() is not None:
+                    break
+            
+            # Get final output
+            remaining_stdout, remaining_stderr = process.communicate()
+            if remaining_stdout:
+                stdout_lines.append(remaining_stdout)
+            if remaining_stderr:
+                stderr_lines.append(remaining_stderr)
+            
+            stdout = ''.join(stdout_lines)
+            stderr = ''.join(stderr_lines)
             
             stage.output = stdout
             stage.error = stderr
@@ -289,8 +352,26 @@ class BuildEngine:
     
     def cancel_build(self, build_id: str):
         if self.current_build and self.current_build['id'] == build_id:
+            self.build_cancelled = True
             self.db.update_build_status(build_id, 'cancelled', self.current_build['completed_stages'])
-            # Note: In a real implementation, you'd need to handle process termination
+            self.db.add_document(
+                build_id, 'log', 'Build Cancelled',
+                'Build was cancelled by user', {'cancelled': True}
+            )
     
     def get_build_status(self, build_id: str) -> Dict:
         return self.db.get_build_details(build_id)
+    
+    def download_lfs_sources(self, build_id: str = None) -> Dict:
+        """Download all LFS source packages"""
+        if not self.downloader:
+            return {"success": [], "failed": [{"package": "downloader", "error": "Repository manager not available"}]}
+        
+        return self.downloader.download_all_packages(build_id)
+    
+    def get_download_status(self) -> Dict:
+        """Get status of downloaded packages"""
+        if not self.downloader:
+            return {"downloaded": [], "missing": [], "corrupted": []}
+        
+        return self.downloader.get_download_status()

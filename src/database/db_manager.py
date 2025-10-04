@@ -1,10 +1,11 @@
 import mysql.connector
 import json
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 class DatabaseManager:
-    def __init__(self, host='localhost', user='lfs_user', password='lfs_pass', database='lfs_builds'):
+    def __init__(self, host='localhost', user='lfs_user', password='LFS_Build_2024!', database='lfs_builds'):
         self.config = {
             'host': host,
             'user': user,
@@ -27,7 +28,7 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS builds (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 build_id VARCHAR(64) UNIQUE NOT NULL,
-                status ENUM('running', 'success', 'failed', 'cancelled') NOT NULL,
+                status ENUM('running', 'success', 'failed', 'cancelled', 'archived') NOT NULL,
                 start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 end_time TIMESTAMP NULL,
                 config_hash VARCHAR(64),
@@ -37,6 +38,15 @@ class DatabaseManager:
                 INDEX idx_start_time (start_time)
             )
         """)
+        
+        # Update existing table to add archived status if it doesn't exist
+        try:
+            cursor.execute("""
+                ALTER TABLE builds MODIFY COLUMN status 
+                ENUM('running', 'success', 'failed', 'cancelled', 'archived') NOT NULL
+            """)
+        except:
+            pass  # Column already has archived status
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS build_stages (
@@ -49,7 +59,6 @@ class DatabaseManager:
                 end_time TIMESTAMP NULL,
                 output_log LONGTEXT,
                 error_log LONGTEXT,
-                FOREIGN KEY (build_id) REFERENCES builds(build_id) ON DELETE CASCADE,
                 INDEX idx_build_stage (build_id, stage_order)
             )
         """)
@@ -63,8 +72,8 @@ class DatabaseManager:
                 content LONGTEXT NOT NULL,
                 metadata JSON,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (build_id) REFERENCES builds(build_id) ON DELETE CASCADE,
-                FULLTEXT(title, content)
+                FULLTEXT(title, content),
+                INDEX idx_build_id (build_id)
             )
         """)
         
@@ -93,6 +102,12 @@ class DatabaseManager:
             """, (build_id, config_hash, total_stages))
             conn.commit()
             cursor.close()
+            
+            # Add initial build document
+            self.add_document(build_id, 'log', 'Build Started', 
+                            f'Build {build_id} started with {total_stages} stages',
+                            {'config_hash': config_hash, 'total_stages': total_stages})
+            
             return True
         except Exception as e:
             print(f"Error creating build: {e}")
@@ -141,6 +156,7 @@ class DatabaseManager:
     
     def add_document(self, build_id: str, doc_type: str, title: str, 
                     content: str, metadata: Dict = None):
+        """Add a document to the database with full-text indexing"""
         conn = self.connect()
         cursor = conn.cursor()
         
@@ -152,6 +168,9 @@ class DatabaseManager:
         """, (build_id, doc_type, title, content, metadata_json))
         conn.commit()
         cursor.close()
+        
+        # Log document creation for visibility
+        print(f"📄 Document saved: {doc_type} - {title} ({len(content)} chars) for build {build_id}")
     
     def search_builds(self, query: str = "", status: str = "", limit: int = 100) -> List[Dict]:
         conn = self.connect()
@@ -160,9 +179,14 @@ class DatabaseManager:
         where_conditions = []
         params = []
         
-        if status:
+        # Exclude archived builds by default unless specifically requested
+        if status == "archived":
+            where_conditions.append("b.status = 'archived'")
+        elif status:
             where_conditions.append("b.status = %s")
             params.append(status)
+        else:
+            where_conditions.append("b.status != 'archived'")
         
         if query:
             where_conditions.append("""
@@ -219,3 +243,85 @@ class DatabaseManager:
             'stages': stages,
             'documents': documents
         }
+    
+    def search_documents(self, query: str, limit: int = 100) -> List[Dict]:
+        """Search documents across all builds using full-text search"""
+        conn = self.connect()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("""
+            SELECT bd.*, b.status as build_status
+            FROM build_documents bd
+            JOIN builds b ON bd.build_id = b.build_id
+            WHERE MATCH(bd.title, bd.content) AGAINST(%s IN NATURAL LANGUAGE MODE)
+            ORDER BY bd.created_at DESC
+            LIMIT %s
+        """, (query, limit))
+        
+        results = cursor.fetchall()
+        cursor.close()
+        return results
+    
+    def get_build_documents(self, build_id: str) -> List[Dict]:
+        """Get all documents for a specific build"""
+        conn = self.connect()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("""
+            SELECT * FROM build_documents 
+            WHERE build_id = %s 
+            ORDER BY created_at DESC
+        """, (build_id,))
+        
+        results = cursor.fetchall()
+        cursor.close()
+        return results
+    
+    def get_document_stats(self) -> Dict:
+        """Get statistics about stored documents"""
+        conn = self.connect()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_documents,
+                COUNT(DISTINCT build_id) as builds_with_docs,
+                document_type,
+                COUNT(*) as type_count
+            FROM build_documents 
+            GROUP BY document_type
+            ORDER BY type_count DESC
+        """)
+        
+        type_stats = cursor.fetchall()
+        
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_documents,
+                COUNT(DISTINCT build_id) as builds_with_docs,
+                SUM(LENGTH(content)) as total_content_size
+            FROM build_documents
+        """)
+        
+        overall_stats = cursor.fetchone()
+        cursor.close()
+        
+        return {
+            'overall': overall_stats,
+            'by_type': type_stats
+        }
+    
+    def get_all_documents(self, limit: int = 1000) -> List[Dict]:
+        """Get all documents from all builds"""
+        conn = self.connect()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("""
+            SELECT * FROM build_documents 
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (limit,))
+        
+        results = cursor.fetchall()
+        cursor.close()
+        return results
