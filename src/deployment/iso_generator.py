@@ -92,3 +92,90 @@ TIMEOUT 50
         
         result = subprocess.run(cmd, capture_output=True, text=True)
         return result.returncode == 0
+    
+    def start_iso_generation(self, iso_config: dict) -> str:
+        """Start ISO generation and return generation ID"""
+        import uuid
+        generation_id = f"iso-{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Extract configuration
+            build_id = iso_config.get('source_build_id')
+            iso_name = iso_config.get('iso_name', 'lfs-custom.iso')
+            output_dir = iso_config.get('output_dir', '/tmp')
+            
+            # Start generation in background
+            import threading
+            generation_thread = threading.Thread(
+                target=self._run_iso_generation, 
+                args=(generation_id, build_id, iso_name, output_dir, iso_config)
+            )
+            generation_thread.daemon = True
+            generation_thread.start()
+            
+            return generation_id
+            
+        except Exception as e:
+            raise Exception(f"Failed to start ISO generation: {str(e)}")
+    
+    def _run_iso_generation(self, generation_id: str, build_id: str, iso_name: str, output_dir: str, config: dict):
+        """Run the actual ISO generation process"""
+        try:
+            print(f"Starting ISO generation {generation_id} for build {build_id}")
+            
+            # Create the ISO
+            result = self.create_bootable_iso(build_id, iso_name)
+            
+            if result.get('success'):
+                # Move to output directory
+                source_path = Path(result['iso_path'])
+                dest_path = Path(output_dir) / iso_name
+                
+                if source_path != dest_path:
+                    shutil.move(str(source_path), str(dest_path))
+                
+                # Generate checksums if requested
+                if config.get('checksums', False):
+                    self._generate_checksums(dest_path)
+                
+                # Create VM image if requested
+                if config.get('vm_image', False):
+                    self._create_vm_image(dest_path)
+                
+                print(f"ISO generation {generation_id} completed successfully")
+            else:
+                print(f"ISO generation {generation_id} failed: {result.get('error')}")
+                
+        except Exception as e:
+            print(f"ISO generation {generation_id} error: {e}")
+    
+    def _generate_checksums(self, iso_path: Path):
+        """Generate MD5 and SHA256 checksums"""
+        try:
+            # MD5
+            result = subprocess.run(['md5sum', str(iso_path)], capture_output=True, text=True)
+            if result.returncode == 0:
+                (iso_path.parent / f"{iso_path.name}.md5").write_text(result.stdout)
+            
+            # SHA256
+            result = subprocess.run(['sha256sum', str(iso_path)], capture_output=True, text=True)
+            if result.returncode == 0:
+                (iso_path.parent / f"{iso_path.name}.sha256").write_text(result.stdout)
+                
+        except Exception as e:
+            print(f"Checksum generation error: {e}")
+    
+    def _create_vm_image(self, iso_path: Path):
+        """Create VM disk image from ISO"""
+        try:
+            vm_path = iso_path.parent / f"{iso_path.stem}.qcow2"
+            
+            # Create qcow2 image
+            subprocess.run([
+                'qemu-img', 'create', '-f', 'qcow2', str(vm_path), '8G'
+            ], check=True)
+            
+            print(f"VM image created: {vm_path}")
+            
+        except Exception as e:
+            print(f"VM image creation error: {e}")

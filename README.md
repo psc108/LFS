@@ -36,6 +36,10 @@ A native GUI build system for Linux From Scratch with MySQL backend, integrated 
 - **Build Scheduling**: Cron-like scheduling for automated recurring builds
 - **Notification System**: Email/Slack notifications for build events and status updates
 - **Plugin Architecture**: Extensible plugin system for custom workflows and integrations
+- **In-House CI/CD System**: GitHub Actions-like pipeline system with Git integration and automated triggers
+- **Enhanced Build Monitoring**: Real-time process detection, stuck build alerts, and comprehensive status checking
+- **Multi-User Collaboration**: Complete user management with roles, permissions, bulk operations, and audit logging
+- **Comprehensive Settings**: Full configuration management for paths, build parameters, and system settings
 
 ## Architecture
 
@@ -74,6 +78,20 @@ A native GUI build system for Linux From Scratch with MySQL backend, integrated 
    - Root cause analysis with dependency tracking
    - Performance correlation and trend analysis
    - ML-based pattern detection and learning
+
+6. **CI/CD Pipeline System** (`src/cicd/`)
+   - In-house pipeline engine with Git integration
+   - Automated pipeline triggering on Git operations
+   - Multi-stage job execution with logging
+   - Pipeline templates and configuration management
+   - Database integration for run history and metrics
+
+7. **Collaboration System** (`src/collaboration/`)
+   - Multi-user authentication and role management
+   - Permission templates and access control
+   - User activity tracking and audit logging
+   - Team collaboration features and notifications
+   - Bulk user operations and import/export
 
 ## Installation
 
@@ -155,12 +173,17 @@ python3 main.py
 - **Document Types**: Logs, configs, outputs, errors, and summaries with metadata
 - **Real-Time Updates**: Documents appear as builds progress
 
-### Build Monitoring
+### Enhanced Build Monitoring
 
 - **Live Log Streaming**: Real-time build output with auto-scroll and manual refresh
 - **System Status**: Monitor running processes, CPU/memory usage, and build activity
 - **Progress Tracking**: Visual progress bars with accurate stage completion counting
 - **Build History**: Search builds by ID, status, or content with filtering options
+- **🔍 Detailed Status Checking**: Comprehensive build diagnostics with process detection
+- **⚠️ Stuck Build Detection**: Automatic alerts for builds with no activity
+- **🔥 Enhanced Force Cancel**: Intelligent process termination with database updates
+- **⏰ Build Health Monitoring**: Periodic health checks with smart recommendations
+- **📊 Real-time Process Tracking**: Live monitoring of compilation and build processes
 
 ### Advanced Fault Analysis
 
@@ -183,11 +206,101 @@ python3 main.py
 - **Complete History**: Every build attempt preserved in Git with full audit trail
 - **Transparent Operation**: All Git operations happen automatically without user intervention
 
-**Enterprise Git Interface** (8th tab in right panel):
+**Enterprise Git Interface** (Git tab in main workspace):
 - **Visual Staging Area**: Interactive file staging with drag-and-drop operations
 - **Commit Graph**: Visual commit history like `git log --graph` with clickable commits
 - **Branch Management**: Create, switch, merge, and delete branches with conflict resolution
 - **Advanced Operations**: Interactive rebase, cherry-pick, stash management, and reset operations
+- **Tag Management**: Create and manage annotated tags with descriptions
+- **Diff Viewer**: Syntax-highlighted diff display for commits and files
+- **Repository Files**: Integrated package management with checksum verification
+- **File Operations**: Open file locations, verify checksums, manage missing packages
+
+### CI/CD Pipeline System
+
+**In-House Pipeline Engine**:
+- **🚀 GitHub Actions-like Functionality**: Complete pipeline system with YAML configuration
+- **🔗 Git Integration**: Automatic pipeline triggering on push, merge, and other Git operations
+- **📋 Multi-Stage Execution**: Support for complex multi-stage pipelines with job dependencies
+- **🔄 Real-time Monitoring**: Live pipeline runs and job status tracking
+- **📊 Database Integration**: All pipeline data stored in MySQL with full history
+- **🎯 LFS Build Integration**: Direct integration with existing LFS build system
+
+**Pipeline Configuration Example**:
+```yaml
+name: lfs-build-pipeline
+triggers:
+  push:
+    branches: [main, develop]
+  schedule:
+    cron: "0 2 * * *"
+stages:
+  - name: build
+    jobs:
+      - name: lfs-build
+        steps:
+          - name: checkout
+            run: echo "Checking out code"
+          - name: build-lfs
+            build:
+              type: lfs
+              config: default-lfs
+  - name: test
+    jobs:
+      - name: run-tests
+        steps:
+          - name: test
+            run: bash scripts/run_tests.sh
+```
+
+**CI/CD Features**:
+- **Pipeline Templates**: Pre-built templates for LFS builds, testing, security scans, and deployment
+- **Git Hooks**: Automatic Git hook installation for seamless integration
+- **Job Logging**: Detailed logging for every pipeline job and step
+- **Artifact Management**: Pipeline artifact storage and management
+- **Notification System**: Email/Slack notifications on pipeline completion
+- **Branch Filtering**: Configure pipelines for specific branches or patterns
+- **Manual Triggers**: Run pipelines manually from the GUI
+- **Pipeline History**: Complete history of all pipeline runs with filtering
+
+### Multi-User Collaboration
+
+**User Management**:
+- **👤 Complete User System**: Add, edit, delete users with comprehensive validation
+- **🔐 Role-Based Access**: Administrator, Build Manager, Developer, and Viewer roles
+- **📋 Permission Templates**: Customizable permission sets for different user types
+- **🔍 Advanced User Search**: Search and filter users by role, status, and activity
+- **📊 User Activity Tracking**: Complete audit log of all user actions
+- **📤 Import/Export**: Bulk user management through CSV import/export
+- **🔄 Bulk Operations**: Activate, deactivate, reset passwords, and change roles in bulk
+
+**Collaboration Features**:
+- **🏢 Team Dashboard**: Real-time team activity and performance metrics
+- **📝 Build Reviews**: Code review system with approval workflows
+- **🔔 Notification Center**: Email and Slack integration for team notifications
+- **⚙️ Collaboration Settings**: Authentication methods, session management, and audit configuration
+- **🔒 Security Features**: Password policies, account lockout, and session timeout
+
+### Comprehensive Settings Management
+
+**Path Configuration**:
+- **📁 Repository Path**: Configure where Git repositories are stored
+- **🏗️ LFS Build Path**: Set LFS build directory location (/mnt/lfs)
+- **📦 Build Artifacts Path**: Configure build artifacts storage location
+- **💿 ISO Output Path**: Set ISO generation output directory
+- **🧪 Path Testing**: Validate all configured paths for accessibility and permissions
+
+**Build Configuration**:
+- **⚡ Max Parallel Jobs**: Configure maximum concurrent build jobs
+- **⏱️ Build Timeout**: Set build timeout limits (5-480 minutes)
+- **🧹 Auto-cleanup**: Automatic cleanup of failed builds
+- **📦 Artifact Compression**: Enable/disable build artifact compression
+- **📝 Log Retention**: Configure build log retention policies
+
+**Storage Configuration**:
+- **💾 Storage Monitoring**: Real-time disk usage monitoring
+- **🔄 Auto-cleanup Settings**: Configure automatic cleanup policies
+- **📊 Usage Tracking**: Monitor storage usage across all componentsck, stash management, and reset operations
 - **Tag Management**: Create and manage annotated tags with descriptions
 - **Diff Viewer**: Syntax-highlighted diff display for commits and files
 - **Repository Files**: Integrated package management with checksum verification
@@ -445,6 +558,31 @@ python3 main.py
 11. **Permission Issues**: System automatically handles LFS directory permissions; use "Setup LFS Permissions" from Build Actions menu if needed
 12. **Build Monitoring**: Progress bars show actual completed stages; live logs stream in real-time with timestamps
 
+### Enhanced Build Troubleshooting
+
+13. **Stuck Builds**: Use "🔍 Check Status" button for comprehensive build diagnostics
+14. **Long-Running Builds**: Toolchain compilation can take 30-45 minutes - system provides progress indicators
+15. **Process Detection**: "🔍 Check Status" shows all running build processes with CPU usage and runtime
+16. **Force Cancel**: Use "🔥 Force Cancel" for unresponsive builds - terminates all related processes
+17. **Build Health**: System automatically alerts for builds with no activity for 15+ minutes
+18. **Log Analysis**: Enhanced log filtering shows compilation progress and error detection
+19. **Timeout Handling**: Builds have configurable timeouts with automatic cleanup
+
+### CI/CD Troubleshooting
+
+20. **Pipeline Failures**: Check pipeline logs in CI/CD Runs tab for detailed error information
+21. **Git Hook Issues**: Use "Setup Git Hooks" in CI/CD setup to reinstall hooks
+22. **Pipeline Configuration**: Validate YAML syntax in pipeline configuration files
+23. **Trigger Problems**: Check branch filters and trigger conditions in pipeline settings
+24. **Job Execution**: Monitor individual job logs for step-by-step execution details
+
+### User Management Issues
+
+25. **Login Problems**: Check user status and password requirements in User Management
+26. **Permission Denied**: Verify user role and permission template assignments
+27. **Bulk Operations**: Use bulk actions for managing multiple users efficiently
+28. **Audit Logs**: Check user activity logs for troubleshooting access issues
+
 ### Live Build Monitoring
 
 - **Real-Time Logs**: Build output streams live with automatic scrolling and periodic updates
@@ -535,6 +673,23 @@ The system automatically handles all Git operations for non-Git users:
 - **Build Comparison**: Compare different build attempts through Git history
 
 ## Changelog
+
+### Version 2.0 - Enterprise CI/CD & Collaboration Platform
+
+- **In-House CI/CD System**: Complete pipeline engine with GitHub Actions-like functionality
+- **Git-Integrated Pipelines**: Automatic pipeline triggering on Git operations with branch filtering
+- **Multi-Stage Job Execution**: Complex pipeline support with parallel and sequential job execution
+- **Pipeline Templates**: Pre-built templates for LFS builds, testing, security, and deployment
+- **Enhanced Build Monitoring**: Real-time process detection, stuck build alerts, and health monitoring
+- **Comprehensive Status Checking**: Detailed build diagnostics with process tracking and recommendations
+- **Multi-User Collaboration**: Complete user management with roles, permissions, and audit logging
+- **Advanced User Management**: Add, edit, delete users with bulk operations and import/export
+- **Permission Templates**: Customizable role-based access control with granular permissions
+- **Team Collaboration Features**: Team dashboard, build reviews, and notification system
+- **Comprehensive Settings**: Full configuration management for paths, build parameters, and storage
+- **Enhanced Force Cancel**: Intelligent process termination with database updates and detailed logging
+- **Build Health Monitoring**: Automatic alerts for stuck builds with smart recommendations
+- **Real-time Process Tracking**: Live monitoring of compilation processes with CPU usage and runtime
 
 ### Version 1.6 - Automated Git Branch Management
 

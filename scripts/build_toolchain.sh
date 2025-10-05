@@ -43,15 +43,18 @@ echo "Configuring binutils..."
              --target=$LFS_TGT   \
              --disable-nls       \
              --enable-gprofng=no \
-             --disable-werror
+             --disable-werror    \
+             MAKEINFO=missing
 echo "✓ Binutils configuration completed"
 
 echo "Building binutils (this may take several minutes)..."
-make -j$(nproc)
+echo "Starting binutils build at $(date)"
+echo "BINUTILS: Compiling binutils with $(nproc) cores..."
+make -j$(nproc) V=1 MAKEINFO=missing
 echo "✓ Binutils build completed"
 
 echo "Installing binutils..."
-make install
+make install MAKEINFO=missing
 echo "✓ Binutils installation completed"
 
 cd $LFS/sources
@@ -106,16 +109,20 @@ echo "Configuring GCC (this may take a few minutes)..."
     --disable-libssp          \
     --disable-libvtv          \
     --disable-libstdcxx       \
-    --enable-languages=c,c++
+    --enable-languages=c,c++  \
+    MAKEINFO=missing
 echo "✓ GCC configuration completed"
 
 echo "Building GCC Pass 1 (this will take 10-30 minutes depending on system)..."
 echo "Progress indicators will appear periodically..."
-make -j$(nproc)
+echo "Starting GCC build at $(date)"
+echo "This is a REAL compilation that will take time - please be patient"
+echo "GCC: Starting compilation with $(nproc) cores - this will take 15-30 minutes..."
+make -j$(nproc) V=1 MAKEINFO=missing
 echo "✓ GCC Pass 1 build completed"
 
 echo "Installing GCC Pass 1..."
-make install
+make install MAKEINFO=missing
 echo "✓ GCC Pass 1 installation completed"
 
 cd ..
@@ -181,7 +188,9 @@ echo "Configuring Glibc..."
 echo "✓ Glibc configuration completed"
 
 echo "Building Glibc (this will take 10-20 minutes)..."
-make -j$(nproc)
+echo "Starting Glibc build at $(date)"
+echo "GLIBC: Starting compilation with $(nproc) cores - this will take 10-20 minutes..."
+make -j$(nproc) V=1
 echo "✓ Glibc build completed"
 
 echo "Installing Glibc..."

@@ -6,6 +6,14 @@ set -e
 
 echo "=== LFS Host System Preparation ==="
 
+# Install missing dependencies first (texinfo not available in RHEL 9+)
+echo "Installing required host dependencies..."
+sudo dnf install -y glibc-devel kernel-headers binutils-devel gcc-c++ 2>/dev/null || {
+    echo "⚠ Could not install some packages automatically"
+    echo "Please install manually: sudo dnf install glibc-devel kernel-headers binutils-devel gcc-c++"
+}
+echo "ℹ Note: makeinfo/texinfo not available in RHEL 9+ - using MAKEINFO=missing (standard LFS approach)"
+
 # Check for required tools - use actual command names, not package names
 REQUIRED_TOOLS=(
     "bash" "ld" "bison" "ls" "diff" "find" "gawk"
@@ -87,6 +95,21 @@ if ! id lfs &>/dev/null; then
     sudo passwd lfs
 else
     echo "LFS user already exists"
+fi
+
+# Fix MySQL database permissions
+echo -e "\nFixing MySQL database permissions..."
+if [ -f ~/.mysql_credentials ]; then
+    MYSQL_ROOT_PASS=$(grep "MySQL Root Password:" ~/.mysql_credentials | cut -d' ' -f4-)
+    echo "Using MySQL root password from credentials file"
+    mysql -u root -p"$MYSQL_ROOT_PASS" -e "DROP USER IF EXISTS 'lfs_user'@'localhost';" 2>/dev/null || true
+    mysql -u root -p"$MYSQL_ROOT_PASS" -e "CREATE USER 'lfs_user'@'localhost' IDENTIFIED BY 'lfs_pass';"
+    mysql -u root -p"$MYSQL_ROOT_PASS" -e "GRANT ALL PRIVILEGES ON lfs_builds.* TO 'lfs_user'@'localhost';"
+    mysql -u root -p"$MYSQL_ROOT_PASS" -e "FLUSH PRIVILEGES;"
+    echo "✓ MySQL user permissions fixed"
+else
+    echo "⚠ MySQL credentials file not found - skipping database user setup"
+    echo "Please run: sudo mysql -p < src/database/setup_database.sql"
 fi
 
 if [ ${#MISSING_TOOLS[@]} -eq 0 ]; then

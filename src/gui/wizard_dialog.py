@@ -355,11 +355,14 @@ Configuration:
     def open_kernel_config(self):
         try:
             from .kernel_config_dialog import KernelConfigDialog
-            dialog = KernelConfigDialog(self)
+            from ..config.settings_manager import SettingsManager
+            settings = SettingsManager()
+            dialog = KernelConfigDialog(settings, self)
             if dialog.exec_() == QDialog.Accepted:
                 self.kernel_config_data = dialog.get_config()
-        except ImportError:
+        except (ImportError, Exception) as e:
             QMessageBox.information(self, "Info", "Kernel configuration will be available in the main interface")
+            print(f"Kernel config error: {e}")
     
     def update_summary(self):
         # Collect configuration

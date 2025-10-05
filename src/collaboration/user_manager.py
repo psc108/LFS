@@ -100,3 +100,73 @@ class UserManager:
                 'last_login': user_data.get('last_login')
             })
         return users_list
+    
+    def list_users(self) -> List[Dict]:
+        """List all users with status information"""
+        users_list = []
+        for username, user_data in self.users.items():
+            last_active = user_data.get('last_login', 'Never')
+            if last_active != 'Never':
+                try:
+                    last_login_dt = datetime.fromisoformat(last_active)
+                    if datetime.now() - last_login_dt < timedelta(hours=1):
+                        status = 'Online'
+                    elif datetime.now() - last_login_dt < timedelta(days=1):
+                        status = 'Recent'
+                    else:
+                        status = 'Offline'
+                except:
+                    status = 'Unknown'
+            else:
+                status = 'Never logged in'
+            
+            users_list.append({
+                'username': username,
+                'role': user_data['role'].title(),
+                'status': status,
+                'last_active': last_active if last_active != 'Never' else 'Never'
+            })
+        
+        return users_list
+    
+    def update_user(self, username: str, updates: Dict) -> Dict:
+        """Update user information"""
+        if username not in self.users:
+            return {'success': False, 'error': 'User not found'}
+        
+        user = self.users[username]
+        
+        if 'role' in updates:
+            user['role'] = updates['role']
+        
+        if 'email' in updates:
+            user['email'] = updates['email']
+        
+        if 'password' in updates:
+            user['password_hash'] = self._hash_password(updates['password'])
+        
+        self._save_users()
+        return {'success': True, 'message': f'User {username} updated'}
+    
+    def delete_user(self, username: str) -> Dict:
+        """Delete user"""
+        if username not in self.users:
+            return {'success': False, 'error': 'User not found'}
+        
+        if username == 'admin':
+            return {'success': False, 'error': 'Cannot delete admin user'}
+        
+        del self.users[username]
+        self._save_users()
+        return {'success': True, 'message': f'User {username} deleted'}
+    
+    def get_user_permissions(self, username: str) -> List[str]:
+        """Get user permissions"""
+        if username in self.users:
+            return self.users[username].get('permissions', [])
+        return []
+    
+    def has_permission(self, username: str, permission: str) -> bool:
+        """Check if user has specific permission"""
+        permissions = self.get_user_permissions(username)
+        return permission in permissions or 'admin' in permissions

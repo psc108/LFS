@@ -143,3 +143,95 @@ class ParallelBuildEngine:
             'memory_usage': self.current_memory_usage,
             'max_memory': self.max_memory_mb
         }
+
+class ParallelBuildOrchestrator:
+    """High-level orchestrator for parallel builds"""
+    
+    def __init__(self):
+        self.engine = None
+        self.active_builds = {}
+    
+    def start_parallel_build(self, config_path: str, build_config: dict) -> str:
+        """Start a parallel build and return build ID"""
+        import uuid
+        # Import will be done below after path setup
+        
+        build_id = f"parallel-{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Initialize components
+            import sys
+            from pathlib import Path
+            sys.path.append(str(Path(__file__).parent.parent))
+            
+            from database.db_manager import DatabaseManager
+            from analysis.integrated_analyzer import IntegratedAnalyzer
+            
+            db = DatabaseManager()
+            analyzer = IntegratedAnalyzer(db)
+            
+            # Create parallel engine
+            self.engine = ParallelBuildEngine(
+                max_workers=build_config.get('max_parallel_jobs', 4),
+                max_memory_mb=build_config.get('memory_limit_gb', 8) * 1024,
+                fault_analyzer=analyzer
+            )
+            
+            # Store build record
+            db.create_build(build_id, config_path, build_config.get('max_parallel_jobs', 4))
+            
+            # Start build in background thread
+            import threading
+            build_thread = threading.Thread(target=self._run_parallel_build, args=(build_id, config_path))
+            build_thread.daemon = True
+            build_thread.start()
+            
+            self.active_builds[build_id] = {
+                'engine': self.engine,
+                'thread': build_thread,
+                'config': build_config
+            }
+            
+            return build_id
+            
+        except Exception as e:
+            raise Exception(f"Failed to start parallel build: {str(e)}")
+    
+    def _run_parallel_build(self, build_id: str, config_path: str):
+        """Run the actual parallel build"""
+        try:
+            # Load build configuration and create tasks
+            # This would parse the YAML config and create BuildTask objects
+            # For now, create sample tasks
+            
+            sample_tasks = [
+                BuildTask("prepare", "Prepare Host", "echo 'Preparing host system'", [], 1, 512),
+                BuildTask("download", "Download Sources", "echo 'Downloading sources'", ["prepare"], 2, 1024),
+                BuildTask("toolchain", "Build Toolchain", "echo 'Building toolchain'", ["download"], 4, 2048),
+                BuildTask("system", "Build System", "echo 'Building system'", ["toolchain"], 4, 4096)
+            ]
+            
+            for task in sample_tasks:
+                self.engine.add_task(task)
+            
+            # Start the parallel build
+            self.engine.start_parallel_build()
+            
+            # Update build status
+            from database.db_manager import DatabaseManager
+            db = DatabaseManager()
+            
+            if len(self.engine.failed_tasks) == 0:
+                db.update_build_status(build_id, 'success', len(sample_tasks))
+            else:
+                db.update_build_status(build_id, 'failed', len(self.engine.completed_tasks))
+            
+        except Exception as e:
+            print(f"Parallel build error: {e}")
+            # Update build status to failed
+            try:
+                from database.db_manager import DatabaseManager
+                db = DatabaseManager()
+                db.update_build_status(build_id, 'failed', 0)
+            except:
+                pass

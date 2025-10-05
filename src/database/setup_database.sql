@@ -4,7 +4,7 @@
 CREATE DATABASE IF NOT EXISTS lfs_builds CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- Create user with strong password
-CREATE USER IF NOT EXISTS 'lfs_user'@'localhost' IDENTIFIED BY 'LFS_Build_2024!';
+CREATE USER IF NOT EXISTS 'lfs_user'@'localhost' IDENTIFIED BY 'lfs_pass';
 GRANT ALL PRIVILEGES ON lfs_builds.* TO 'lfs_user'@'localhost';
 FLUSH PRIVILEGES;
 

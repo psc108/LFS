@@ -900,3 +900,24 @@ This repository contains build configurations, scripts, and patches for Linux Fr
         except Exception as e:
             print(f"Error staging all changes: {e}")
             return False
+    
+    def get_status(self) -> Dict:
+        """Get repository status (alias for get_repository_status)"""
+        return self.get_repository_status()
+    
+    def get_recent_commits(self, max_count: int = 10) -> List[Dict]:
+        """Get recent commits"""
+        try:
+            commits = []
+            for commit in self.git_repo.iter_commits(max_count=max_count):
+                commits.append({
+                    'hash': commit.hexsha,
+                    'short_hash': commit.hexsha[:8],
+                    'message': commit.message.strip(),
+                    'author': str(commit.author),
+                    'date': datetime.fromtimestamp(commit.committed_date)
+                })
+            return commits
+        except Exception as e:
+            print(f"Error getting recent commits: {e}")
+            return []

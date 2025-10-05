@@ -37,11 +37,11 @@ class BuildEngine:
         self.current_build = None
         self.build_thread = None
         self.build_cancelled = False
+        self.current_process = None
         self.sudo_password = None
         self.callbacks = {
             'stage_start': [],
             'stage_complete': [],
-            'build_complete': [],
             'build_error': [],
             'sudo_required': []
         }
@@ -156,7 +156,13 @@ class BuildEngine:
     def start_build(self, config_path: str, build_name: str = None) -> str:
         self.load_build_config(config_path)
         
-        build_id = build_name or f"lfs-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+        # Generate unique build ID
+        if build_name:
+            timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            unique_suffix = str(uuid.uuid4())[:8]
+            build_id = f"{build_name}-{timestamp}-{unique_suffix}"
+        else:
+            build_id = f"lfs-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
         
         with open(config_path, 'r') as f:
             config_content = f.read()
@@ -164,7 +170,7 @@ class BuildEngine:
         
         total_stages = len(self.stages)
         
-        if not self.db.create_build(build_id, config_hash, total_stages):
+        if not self.db.create_build(build_id, build_name or "unnamed-build", total_stages):
             raise Exception("Failed to create build record")
         
         # Create dedicated Git branch for this build
@@ -200,13 +206,39 @@ class BuildEngine:
             # Commit initial build state to branch
             self._commit_build_start(build_id)
             
-            # Setup LFS permissions before starting build
-            self._setup_lfs_permissions(build_id)
+            # Setup LFS permissions before starting build (non-blocking)
+            try:
+                self._setup_lfs_permissions(build_id)
+            except Exception as e:
+                print(f"⚠️ Permission setup failed, continuing build: {e}")
+                self.db.add_document(
+                    build_id, 'log', 'Permission Setup Warning',
+                    f'Permission setup failed but build will continue: {str(e)}',
+                    {'setup': True, 'warning': True}
+                )
                 
-            stages_list = sorted(self.stages.values(), key=lambda x: x.order)
+            print(f"🚀 Starting build execution for {build_id}")
+            print(f"📁 Current working directory: {os.getcwd()}")
+            print(f"📝 Total stages to execute: {len(self.stages)}")
             
-            for stage in stages_list:
+            # Log build start
+            self.db.add_document(
+                build_id, 'log', 'Build Execution Started',
+                f'Build {build_id} execution started\n'
+                f'Working directory: {os.getcwd()}\n'
+                f'Total stages: {len(self.stages)}\n'
+                f'Stages: {", ".join([s.name for s in self.stages.values()])}',
+                {'build_start': True}
+            )
+            
+            stages_list = sorted(self.stages.values(), key=lambda x: x.order)
+            print(f"📅 Executing {len(stages_list)} stages in order: {[s.name for s in stages_list]}")
+            
+            for i, stage in enumerate(stages_list):
+                print(f"🔄 Stage {i+1}/{len(stages_list)}: {stage.name} (order: {stage.order})")
+                
                 if self.build_cancelled:
+                    print(f"🚫 Build cancelled before stage {stage.name}")
                     self.db.update_build_status(build_id, 'cancelled', self.current_build.get('completed_stages', 0))
                     return
                 
@@ -291,6 +323,26 @@ class BuildEngine:
             else:
                 env = None
             
+            # Add timeout and better error handling for stuck processes
+            print(f"🚀 Starting stage {stage.name} with command: {command[:100]}...")
+            
+            # Ensure we're in the LFS project directory where scripts exist
+            project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            print(f"📁 Working directory: {project_dir}")
+            
+            # Verify scripts directory exists
+            scripts_dir = os.path.join(project_dir, 'scripts')
+            if not os.path.exists(scripts_dir):
+                raise Exception(f"Scripts directory not found: {scripts_dir}")
+            
+            # Check if the specific script exists for this stage
+            if 'scripts/' in command:
+                script_name = command.split('scripts/')[1].split()[0]
+                script_path = os.path.join(scripts_dir, script_name)
+                if not os.path.exists(script_path):
+                    raise Exception(f"Script not found: {script_path}")
+                print(f"✅ Script found: {script_path}")
+            
             process = subprocess.Popen(
                 command,
                 shell=True,
@@ -299,7 +351,27 @@ class BuildEngine:
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
-                env=env
+                env=env,
+                cwd=project_dir  # Run from project root where scripts/ directory exists
+            )
+            
+            # Store current process for cancellation
+            self.current_process = process
+            
+            # Add timeout tracking with shorter timeout for debugging
+            import time
+            start_time = time.time()
+            last_output_time = start_time
+            timeout_seconds = 1800  # 30 minutes timeout per stage (reduced for debugging)
+            
+            # Log stage start with more details
+            self.db.add_document(
+                build_id, 'log', f'Stage Started: {stage.name}',
+                f"Stage {stage.name} started at {datetime.now()}\n"
+                f"Command: {command}\n"
+                f"Working directory: {project_dir}\n"
+                f"Timeout: {timeout_seconds} seconds",
+                {'stage_order': stage.order, 'stage_start': True}
             )
             
             # Read output in real-time with periodic logging
@@ -308,39 +380,100 @@ class BuildEngine:
             line_count = 0
             
             while True:
+                # Check for cancellation
+                if self.build_cancelled:
+                    try:
+                        process.terminate()
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    stage.status = 'cancelled'
+                    stage.error = 'Build was cancelled by user'
+                    self.current_process = None
+                    return
+                
+                # Check for timeout (no output for too long) and log status periodically
+                current_time = time.time()
+                elapsed_time = current_time - start_time
+                
+                # Log status every 2 minutes
+                if int(elapsed_time) % 120 == 0 and int(elapsed_time) > 0:
+                    print(f"⏱️ Stage {stage.name} running for {int(elapsed_time/60)} minutes, {line_count} lines processed")
+                    self.db.add_document(
+                        build_id, 'log', f'Stage Status: {stage.name}',
+                        f"Stage running for {int(elapsed_time/60)} minutes\n"
+                        f"Lines processed: {line_count}\n"
+                        f"Last output: {int((current_time - last_output_time)/60)} minutes ago",
+                        {'stage_order': stage.order, 'status_update': True, 'elapsed_minutes': int(elapsed_time/60)}
+                    )
+                
+                if current_time - last_output_time > timeout_seconds:
+                    print(f"⏰ Stage {stage.name} timed out after {timeout_seconds} seconds of no output")
+                    self.db.add_document(
+                        build_id, 'error', f'Stage Timeout: {stage.name}',
+                        f"Stage timed out after {timeout_seconds} seconds of no output\n"
+                        f"Total runtime: {int(elapsed_time/60)} minutes\n"
+                        f"Lines processed: {line_count}",
+                        {'stage_order': stage.order, 'timeout': True}
+                    )
+                    try:
+                        process.terminate()
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    stage.status = 'failed'
+                    stage.error = f'Stage timed out after {timeout_seconds} seconds of no output'
+                    self.current_process = None
+                    return
+                
                 stdout_line = process.stdout.readline()
                 stderr_line = process.stderr.readline()
+                
+                # Update last output time if we got any output
+                if stdout_line or stderr_line:
+                    last_output_time = current_time
                 
                 if stdout_line:
                     stdout_lines.append(stdout_line)
                     line_count += 1
-                    # Log progress every 50 lines and show key progress in CLI
-                    if line_count % 50 == 0:
-                        partial_output = ''.join(stdout_lines[-10:])  # Last 10 lines
-                        # Show progress indicators in CLI
-                        recent_line = stdout_lines[-1].strip() if stdout_lines else ''
-                        if recent_line and any(word in recent_line.lower() for word in ['✓', 'completed', 'installing', 'building', 'configuring', 'extracting']):
-                            print(f"📋 Build Progress: {recent_line}")
-                        else:
-                            # Show periodic "still running" indicator
-                            print(f"🔄 Stage {stage.name} running... ({line_count} lines processed)")
+                    
+                    # Show every line in CLI for debugging stuck builds
+                    line_stripped = stdout_line.strip()
+                    if line_stripped:
+                        print(f"📋 {stage.name}: {line_stripped}")
+                    
+                    # Log progress every 5 lines for better monitoring of stuck builds
+                    if line_count % 5 == 0:
+                        partial_output = ''.join(stdout_lines[-3:])  # Last 3 lines
+                        print(f"🔄 Stage {stage.name} running... ({line_count} lines processed)")
                         
                         self.db.add_document(
                             build_id, 'log', f'Stage Progress: {stage.name}',
                             f"Lines processed: {line_count}\n\nRecent output:\n{partial_output}",
                             {'stage_order': stage.order, 'progress': True, 'line_count': line_count}
                         )
+                    
+                    # Also log every significant line immediately to database
+                    if any(keyword in line_stripped.lower() for keyword in 
+                           ['building', 'compiling', 'installing', 'extracting', 'configuring', 'make', 'gcc', 'error', 'failed']):
+                        self.db.add_document(
+                            build_id, 'log', f'Stage Activity: {stage.name}',
+                            f"Activity: {line_stripped}",
+                            {'stage_order': stage.order, 'activity': True, 'timestamp': datetime.now().isoformat()}
+                        )
                 
                 if stderr_line:
                     stderr_lines.append(stderr_line)
                     line_stripped = stderr_line.strip()
                     if line_stripped:
+                        # Show all stderr output for debugging
+                        print(f"🚨 {stage.name} stderr: {line_stripped}")
+                        
                         # Check if it's a warning or info message
                         if any(word in stderr_line.lower() for word in ['warning:', 'note:', 'info:', 'makeinfo is missing', 'documentation will not be built']):
                             stage_warnings.append(line_stripped)
                         else:
                             # Log actual errors immediately
-                            print(f"🚨 Build Error: {line_stripped}")  # Show in CLI
                             self.db.add_document(
                                 build_id, 'log', f'Stage Error Output: {stage.name}',
                                 f"Error line: {line_stripped}",
@@ -359,6 +492,9 @@ class BuildEngine:
             
             stdout = ''.join(stdout_lines)
             stderr = ''.join(stderr_lines)
+            
+            # Clear current process reference
+            self.current_process = None
             
             # Log final line count and show completion status
             if line_count > 0:
@@ -382,7 +518,8 @@ class BuildEngine:
             
             if process.returncode == 0:
                 stage.status = 'success'
-                print(f"✓ Stage {stage.name} completed successfully")
+                print(f"✅ Stage {stage.name} completed successfully (return code 0)")
+                print(f"📊 Stage output: {len(stdout)} chars stdout, {len(stderr)} chars stderr")
                 self.db.add_stage_log(build_id, stage.name, 'success', stdout)
                 
                 self.db.add_document(
@@ -405,8 +542,11 @@ class BuildEngine:
             else:
                 stage.status = 'failed'
                 print(f"❌ Stage {stage.name} failed with return code {process.returncode}")
+                print(f"📊 Stage output: {len(stdout)} chars stdout, {len(stderr)} chars stderr")
                 if stderr.strip():
-                    print(f"Error details: {stderr.strip()[:200]}...")  # Show first 200 chars
+                    print(f"🔍 Error details: {stderr.strip()[:500]}...")  # Show first 500 chars
+                if stdout.strip():
+                    print(f"🔍 Last stdout: {stdout.strip()[-500:]}...")  # Show last 500 chars
                 self.db.add_stage_log(build_id, stage.name, 'failed', stdout)
                 
                 # Perform fault analysis on failure
@@ -440,7 +580,10 @@ class BuildEngine:
         except Exception as e:
             stage.status = 'failed'
             stage.error = str(e)
+            print(f"❌ Exception in stage {stage.name}: {str(e)}")
             self.db.add_stage_log(build_id, stage.name, 'failed', str(e))
+            # Clear current process reference on exception
+            self.current_process = None
         
         self.emit_event('stage_complete', {
             'build_id': build_id, 
@@ -491,11 +634,89 @@ class BuildEngine:
     def cancel_build(self, build_id: str):
         if self.current_build and self.current_build['id'] == build_id:
             self.build_cancelled = True
+            
+            # Terminate current process if running
+            if self.current_process:
+                try:
+                    print(f"🛑 Terminating running process for build {build_id} (PID: {self.current_process.pid})")
+                    
+                    # Try to kill the entire process group to catch child processes
+                    import os
+                    import signal
+                    try:
+                        os.killpg(os.getpgid(self.current_process.pid), signal.SIGTERM)
+                        print(f"💫 Sent SIGTERM to process group {os.getpgid(self.current_process.pid)}")
+                    except:
+                        # Fallback to just the main process
+                        self.current_process.terminate()
+                        print(f"💫 Sent SIGTERM to process {self.current_process.pid}")
+                    
+                    # Give process 5 seconds to terminate gracefully
+                    try:
+                        self.current_process.wait(timeout=5)
+                        print(f"✅ Process terminated gracefully")
+                    except subprocess.TimeoutExpired:
+                        print(f"🔥 Force killing process for build {build_id}")
+                        try:
+                            os.killpg(os.getpgid(self.current_process.pid), signal.SIGKILL)
+                        except:
+                            self.current_process.kill()
+                        self.current_process.wait()
+                        print(f"💫 Process force killed")
+                    
+                    self.current_process = None
+                except Exception as e:
+                    print(f"⚠ Error terminating process: {e}")
+            else:
+                print(f"🔍 No active process found for build {build_id}")
+            
             self.db.update_build_status(build_id, 'cancelled', self.current_build['completed_stages'])
             self.db.add_document(
                 build_id, 'log', 'Build Cancelled',
-                'Build was cancelled by user', {'cancelled': True}
+                f'Build was cancelled by user at {datetime.now()}', {'cancelled': True}
             )
+            
+            # Commit cancellation to build branch
+            self._commit_build_completion(build_id, 'cancelled')
+            
+            # Emit build completion event for GUI updates
+            self.emit_event('build_complete', {'build_id': build_id, 'status': 'cancelled'})
+            
+            print(f"✅ Build {build_id} cancelled successfully")
+    
+    def force_cleanup_build(self, build_id: str):
+        """Force cleanup of a stuck build"""
+        print(f"🧽 Force cleaning up build {build_id}")
+        
+        # Kill any processes that might be related
+        import psutil
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    cmdline = ' '.join(proc.info['cmdline'] or [])
+                    if 'bash scripts/' in cmdline or build_id in cmdline:
+                        print(f"🔥 Killing related process: {proc.info['pid']} - {proc.info['name']}")
+                        proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception as e:
+            print(f"⚠ Error during process cleanup: {e}")
+        
+        # Update database
+        if self.current_build and self.current_build['id'] == build_id:
+            self.build_cancelled = True
+            self.current_process = None
+            self.db.update_build_status(build_id, 'cancelled', self.current_build.get('completed_stages', 0))
+            self.db.add_document(
+                build_id, 'log', 'Build Force Cleaned',
+                f'Build was force cleaned due to stuck state at {datetime.now()}', 
+                {'force_cleanup': True}
+            )
+            
+            # Emit completion event
+            self.emit_event('build_complete', {'build_id': build_id, 'status': 'cancelled'})
+        
+        print(f"✅ Build {build_id} force cleanup completed")
     
     def get_build_status(self, build_id: str) -> Dict:
         return self.db.get_build_details(build_id)
@@ -517,79 +738,137 @@ class BuildEngine:
     def _setup_lfs_permissions(self, build_id: str):
         """Setup LFS directory permissions before build"""
         try:
-            if not self.sudo_password:
-                self.db.add_document(
-                    build_id, 'log', 'LFS Permissions Setup Skipped',
-                    'No sudo password available - skipping permissions setup',
-                    {'setup': True, 'skipped': True}
-                )
-                return
+            print(f"🔧 Setting up LFS permissions for build {build_id}")
             
-            # Create askpass script
-            askpass_script = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh')
-            askpass_script.write(f'#!/bin/bash\necho "{self.sudo_password}"\n')
-            askpass_script.close()
-            os.chmod(askpass_script.name, 0o755)
-            
-            env = os.environ.copy()
-            env['SUDO_ASKPASS'] = askpass_script.name
-            
+            # Try to create basic directories without sudo first
+            basic_setup_success = False
             try:
-                # Setup LFS directories directly
-                commands = [
-                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/sources'],
-                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/tools'],
-                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/usr'],
-                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/lib'],
-                    ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/lib64'],
-                    ['sudo', '-A', 'chmod', '777', '/mnt/lfs/sources'],
-                    ['sudo', '-A', 'chmod', '777', '/mnt/lfs/tools'],
-                    ['sudo', '-A', 'chmod', '777', '/mnt/lfs/usr'],
-                    ['sudo', '-A', 'chmod', '755', '/mnt/lfs/lib'],
-                    ['sudo', '-A', 'chmod', '755', '/mnt/lfs/lib64'],
-                    ['sudo', '-A', 'chown', '-R', f'{os.getenv("USER", "scottp")}:{os.getenv("USER", "scottp")}', '/mnt/lfs/sources/']
-                ]
+                os.makedirs('/mnt/lfs/sources', mode=0o755, exist_ok=True)
+                os.makedirs('/mnt/lfs/tools', mode=0o755, exist_ok=True)
+                os.makedirs('/mnt/lfs/usr', mode=0o755, exist_ok=True)
+                basic_setup_success = True
+                print(f"✅ Created basic LFS directories without sudo")
+            except PermissionError:
+                print(f"⚠️ Need sudo for LFS directory creation")
+            
+            if not basic_setup_success and not self.sudo_password:
+                # Prompt for sudo password if needed
+                print(f"🔐 Sudo password required for LFS permissions setup")
+                self.emit_event('sudo_required', {'build_id': build_id, 'reason': 'LFS directory setup'})
                 
-                output_lines = []
-                for cmd in commands:
-                    try:
-                        result = subprocess.run(
-                            cmd,
-                            capture_output=True,
-                            text=True,
-                            env=env,
-                            timeout=30
-                        )
-                        output_lines.append(f"Command: {' '.join(cmd)}")
-                        output_lines.append(f"Return code: {result.returncode}")
-                        if result.stdout:
-                            output_lines.append(f"Output: {result.stdout}")
-                        if result.stderr:
-                            output_lines.append(f"Errors: {result.stderr}")
-                        output_lines.append("")
-                    except subprocess.TimeoutExpired:
-                        output_lines.append(f"Command timed out: {' '.join(cmd)}")
-                    except Exception as e:
-                        output_lines.append(f"Command failed: {' '.join(cmd)} - {str(e)}")
+                # Wait a bit for password to be set
+                import time
+                for i in range(30):  # Wait up to 30 seconds
+                    if self.sudo_password:
+                        break
+                    time.sleep(1)
                 
-                self.db.add_document(
-                    build_id, 'log', 'LFS Permissions Setup',
-                    '\n'.join(output_lines),
-                    {'setup': True, 'return_code': 0}
-                )
+                if not self.sudo_password:
+                    self.db.add_document(
+                        build_id, 'log', 'LFS Permissions Setup Skipped',
+                        'No sudo password provided - attempting build without full permissions setup\n'
+                        'Build may fail if LFS directories are not accessible',
+                        {'setup': True, 'skipped': True, 'warning': True}
+                    )
+                    return
+            
+            if self.sudo_password:
+                # Create askpass script
+                askpass_script = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh')
+                askpass_script.write(f'#!/bin/bash\necho "{self.sudo_password}"\n')
+                askpass_script.close()
+                os.chmod(askpass_script.name, 0o755)
                 
-            finally:
-                # Cleanup askpass script
+                env = os.environ.copy()
+                env['SUDO_ASKPASS'] = askpass_script.name
+                
                 try:
-                    os.unlink(askpass_script.name)
-                except:
-                    pass
+                    # Setup LFS directories with proper permissions
+                    commands = [
+                        ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs'],
+                        ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/sources'],
+                        ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/tools'],
+                        ['sudo', '-A', 'mkdir', '-p', '/mnt/lfs/usr'],
+                        ['sudo', '-A', 'chmod', '755', '/mnt/lfs'],
+                        ['sudo', '-A', 'chmod', '777', '/mnt/lfs/sources'],
+                        ['sudo', '-A', 'chmod', '777', '/mnt/lfs/tools'],
+                        ['sudo', '-A', 'chmod', '777', '/mnt/lfs/usr'],
+                        ['sudo', '-A', 'chown', '-R', f'{os.getenv("USER", "scottp")}:{os.getenv("USER", "scottp")}', '/mnt/lfs']
+                    ]
+                    
+                    output_lines = []
+                    failed_commands = []
+                    
+                    for cmd in commands:
+                        try:
+                            result = subprocess.run(
+                                cmd,
+                                capture_output=True,
+                                text=True,
+                                env=env,
+                                timeout=30
+                            )
+                            output_lines.append(f"Command: {' '.join(cmd)}")
+                            output_lines.append(f"Return code: {result.returncode}")
+                            if result.stdout:
+                                output_lines.append(f"Output: {result.stdout}")
+                            if result.stderr:
+                                output_lines.append(f"Errors: {result.stderr}")
+                            
+                            if result.returncode != 0:
+                                failed_commands.append(' '.join(cmd))
+                            
+                            output_lines.append("")
+                        except subprocess.TimeoutExpired:
+                            error_msg = f"Command timed out: {' '.join(cmd)}"
+                            output_lines.append(error_msg)
+                            failed_commands.append(' '.join(cmd))
+                        except Exception as e:
+                            error_msg = f"Command failed: {' '.join(cmd)} - {str(e)}"
+                            output_lines.append(error_msg)
+                            failed_commands.append(' '.join(cmd))
+                    
+                    if failed_commands:
+                        output_lines.append(f"\nFailed commands: {len(failed_commands)}")
+                        for cmd in failed_commands:
+                            output_lines.append(f"  - {cmd}")
+                        output_lines.append("\nBuild may fail due to permission issues")
+                    
+                    self.db.add_document(
+                        build_id, 'log', 'LFS Permissions Setup',
+                        '\n'.join(output_lines),
+                        {'setup': True, 'failed_commands': len(failed_commands)}
+                    )
+                    
+                    if failed_commands:
+                        print(f"⚠️ {len(failed_commands)} permission commands failed")
+                    else:
+                        print(f"✅ LFS permissions setup completed successfully")
+                    
+                finally:
+                    # Cleanup askpass script
+                    try:
+                        os.unlink(askpass_script.name)
+                    except:
+                        pass
+            else:
+                self.db.add_document(
+                    build_id, 'log', 'LFS Permissions Setup - Basic',
+                    'Created basic LFS directories without sudo\n'
+                    'Full permission setup skipped - build will use current user permissions',
+                    {'setup': True, 'basic_only': True}
+                )
+                print(f"✅ Basic LFS directory setup completed")
             
         except Exception as e:
+            error_msg = f"LFS permissions setup failed: {str(e)}"
+            print(f"❌ {error_msg}")
             self.db.add_document(
                 build_id, 'error', 'LFS Permissions Setup Failed',
-                str(e), {'setup': True}
+                error_msg, {'setup': True, 'exception': True}
             )
+            # Don't fail the build for permission setup issues
+            print(f"⚠️ Continuing build despite permission setup failure")
     
     def _create_build_branch(self, build_id: str) -> str:
         """Create a dedicated Git branch for this build"""

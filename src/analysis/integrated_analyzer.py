@@ -16,6 +16,34 @@ class IntegratedFaultAnalyzer:
         # Initialize analysis tables
         self._init_analysis_tables()
     
+    def start_comprehensive_analysis(self, analysis_config: dict, scope: str) -> str:
+        """Start comprehensive analysis and return analysis ID"""
+        import uuid
+        analysis_id = f"analysis-{uuid.uuid4().hex[:8]}"
+        
+        # Store analysis configuration
+        try:
+            conn = self.db.connect()
+            if conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT INTO analysis_results 
+                    (build_id, component_type, analysis_type, risk_score, findings)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    analysis_id, 'build', 'comprehensive', 0,
+                    json.dumps(analysis_config)
+                ))
+                
+                conn.commit()
+                cursor.close()
+            
+        except Exception as e:
+            print(f"Error storing analysis config: {e}")
+        
+        return analysis_id
+
     def _init_analysis_tables(self):
         """Initialize database tables for fault analysis"""
         try:
@@ -359,19 +387,20 @@ class IntegratedFaultAnalyzer:
         """Store analysis result in database"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                INSERT INTO analysis_results 
-                (build_id, component_type, analysis_type, risk_score, findings, recommendations)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (
-                build_id, component_type, analysis_type, risk_score,
-                json.dumps(findings), json.dumps(self._generate_recommendations(findings))
-            ))
-            
-            conn.commit()
-            cursor.close()
+            if conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT INTO analysis_results 
+                    (build_id, component_type, analysis_type, risk_score, findings, recommendations)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    build_id, component_type, analysis_type, risk_score,
+                    json.dumps(findings), json.dumps(self._generate_recommendations(findings))
+                ))
+                
+                conn.commit()
+                cursor.close()
             
         except Exception as e:
             print(f"Error storing analysis result: {e}")
