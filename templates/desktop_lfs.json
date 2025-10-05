@@ -1,0 +1,64 @@
+{
+  "name": "Desktop LFS",
+  "description": "Full desktop environment with GUI applications",
+  "category": "desktop",
+  "config": {
+    "name": "Desktop Linux From Scratch",
+    "version": "12.4",
+    "target_arch": "x86_64",
+    "optimization": "performance",
+    "packages": [
+      "essential",
+      "xorg",
+      "desktop",
+      "multimedia"
+    ],
+    "stages": [
+      {
+        "name": "prepare_host",
+        "order": 1,
+        "command": "bash scripts/prepare_host.sh"
+      },
+      {
+        "name": "download_sources",
+        "order": 2,
+        "command": "bash scripts/download_desktop.sh"
+      },
+      {
+        "name": "build_toolchain",
+        "order": 3,
+        "command": "bash scripts/build_toolchain.sh"
+      },
+      {
+        "name": "build_system",
+        "order": 4,
+        "command": "bash scripts/build_system.sh"
+      },
+      {
+        "name": "build_xorg",
+        "order": 5,
+        "command": "bash scripts/build_xorg.sh"
+      },
+      {
+        "name": "build_desktop",
+        "order": 6,
+        "command": "bash scripts/build_desktop.sh"
+      },
+      {
+        "name": "configure_system",
+        "order": 7,
+        "command": "bash scripts/configure_desktop.sh"
+      },
+      {
+        "name": "build_kernel",
+        "order": 8,
+        "command": "bash scripts/build_kernel.sh"
+      },
+      {
+        "name": "install_bootloader",
+        "order": 9,
+        "command": "bash scripts/install_bootloader.sh"
+      }
+    ]
+  }
+}

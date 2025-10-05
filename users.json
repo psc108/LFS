@@ -1,0 +1,14 @@
+{
+  "admin": {
+    "password_hash": "c8a381dad5ca3ea820d350d8b29761fb667dd42617414e657771056b5d5fd5d6",
+    "role": "admin",
+    "email": "admin@lfs.local",
+    "created_at": "2025-10-04T23:20:47.486627",
+    "permissions": [
+      "build",
+      "admin",
+      "view",
+      "delete"
+    ]
+  }
+}
