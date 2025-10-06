@@ -251,6 +251,8 @@ class BuildEngine:
                 if stage.status == 'failed' or self.build_cancelled:
                     status = 'cancelled' if self.build_cancelled else 'failed'
                     self.db.update_build_status(build_id, status, self.current_build.get('completed_stages', 0))
+                    # Perform automatic cleanup on failure
+                    self._perform_build_cleanup(build_id, status, stage.name)
                     # Commit failed/cancelled build state
                     self._commit_build_completion(build_id, status)
                     self.emit_event('build_error', {'build_id': build_id, 'stage': stage.name})
@@ -273,6 +275,8 @@ class BuildEngine:
                     build_id, 'error', 'Build Exception', 
                     str(e), {'exception_type': type(e).__name__}
                 )
+                # Perform automatic cleanup on exception
+                self._perform_build_cleanup(build_id, 'failed', 'build_exception')
                 # Commit failed build state
                 if self.current_build:
                     self._commit_build_completion(build_id, 'failed')
@@ -676,6 +680,9 @@ class BuildEngine:
                 f'Build was cancelled by user at {datetime.now()}', {'cancelled': True}
             )
             
+            # Perform cleanup after cancellation
+            self._perform_build_cleanup(build_id, 'cancelled', 'user_cancel')
+            
             # Commit cancellation to build branch
             self._commit_build_completion(build_id, 'cancelled')
             
@@ -712,6 +719,9 @@ class BuildEngine:
                 f'Build was force cleaned due to stuck state at {datetime.now()}', 
                 {'force_cleanup': True}
             )
+            
+            # Perform cleanup after force cancel
+            self._perform_build_cleanup(build_id, 'cancelled', 'force_cleanup')
             
             # Emit completion event
             self.emit_event('build_complete', {'build_id': build_id, 'status': 'cancelled'})
@@ -957,3 +967,164 @@ class BuildEngine:
             
         except Exception as e:
             print(f"Failed to commit build completion: {e}")
+    
+    def _perform_build_cleanup(self, build_id: str, status: str, reason: str):
+        """Perform automatic cleanup when builds fail and document the process"""
+        cleanup_start = datetime.now()
+        cleanup_actions = []
+        cleanup_errors = []
+        
+        print(f"🧹 Starting automatic cleanup for build {build_id} (status: {status}, reason: {reason})")
+        
+        try:
+            # 1. Clean up build directories
+            lfs_sources = "/mnt/lfs/sources"
+            if os.path.exists(lfs_sources):
+                try:
+                    # Remove extracted source directories but keep original packages
+                    import glob
+                    extracted_dirs = []
+                    for pattern in ["binutils-*", "gcc-*", "glibc-*", "linux-*"]:
+                        for path in glob.glob(os.path.join(lfs_sources, pattern)):
+                            if os.path.isdir(path) and not path.endswith('.tar.xz') and not path.endswith('.tar.gz'):
+                                extracted_dirs.append(path)
+                    
+                    for dir_path in extracted_dirs:
+                        try:
+                            import shutil
+                            shutil.rmtree(dir_path)
+                            cleanup_actions.append(f"Removed extracted directory: {os.path.basename(dir_path)}")
+                        except Exception as e:
+                            cleanup_errors.append(f"Failed to remove {dir_path}: {str(e)}")
+                    
+                    if extracted_dirs:
+                        cleanup_actions.append(f"Cleaned {len(extracted_dirs)} extracted source directories")
+                    else:
+                        cleanup_actions.append("No extracted source directories found to clean")
+                        
+                except Exception as e:
+                    cleanup_errors.append(f"Error during source directory cleanup: {str(e)}")
+            
+            # 2. Clean up temporary build files
+            temp_patterns = ["/tmp/lfs_*", "/tmp/build_*", "/tmp/askpass_*"]
+            for pattern in temp_patterns:
+                try:
+                    import glob
+                    temp_files = glob.glob(pattern)
+                    for temp_file in temp_files:
+                        try:
+                            if os.path.isfile(temp_file):
+                                os.unlink(temp_file)
+                                cleanup_actions.append(f"Removed temp file: {os.path.basename(temp_file)}")
+                            elif os.path.isdir(temp_file):
+                                import shutil
+                                shutil.rmtree(temp_file)
+                                cleanup_actions.append(f"Removed temp directory: {os.path.basename(temp_file)}")
+                        except Exception as e:
+                            cleanup_errors.append(f"Failed to remove temp file {temp_file}: {str(e)}")
+                except Exception as e:
+                    cleanup_errors.append(f"Error cleaning temp files with pattern {pattern}: {str(e)}")
+            
+            # 3. Kill any remaining build processes
+            killed_processes = []
+            try:
+                import psutil
+                for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                    try:
+                        cmdline = ' '.join(proc.info['cmdline'] or [])
+                        if any(pattern in cmdline for pattern in [
+                            'build_toolchain.sh', 'prepare_host.sh', 'download_sources.sh',
+                            build_id, '/mnt/lfs', 'make -j', 'gcc', 'configure'
+                        ]):
+                            proc.terminate()
+                            killed_processes.append(f"PID {proc.info['pid']}: {proc.info['name']}")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+                        pass
+                
+                if killed_processes:
+                    cleanup_actions.append(f"Terminated {len(killed_processes)} build-related processes")
+                    for proc_info in killed_processes:
+                        cleanup_actions.append(f"  - {proc_info}")
+                else:
+                    cleanup_actions.append("No build-related processes found to terminate")
+                    
+            except Exception as e:
+                cleanup_errors.append(f"Error during process cleanup: {str(e)}")
+            
+            # 4. Reset build state variables
+            if self.current_build and self.current_build['id'] == build_id:
+                self.current_process = None
+                self.build_cancelled = False
+                cleanup_actions.append("Reset build engine state variables")
+            
+            # 5. Clean up askpass scripts
+            if hasattr(self, '_current_askpass_script'):
+                try:
+                    os.unlink(self._current_askpass_script)
+                    delattr(self, '_current_askpass_script')
+                    cleanup_actions.append("Removed askpass script")
+                except Exception as e:
+                    cleanup_errors.append(f"Failed to remove askpass script: {str(e)}")
+            
+            cleanup_end = datetime.now()
+            cleanup_duration = (cleanup_end - cleanup_start).total_seconds()
+            
+            # Document the cleanup process
+            cleanup_summary = f"Automatic cleanup completed for build {build_id}\n\n"
+            cleanup_summary += f"Trigger: {reason}\n"
+            cleanup_summary += f"Status: {status}\n"
+            cleanup_summary += f"Duration: {cleanup_duration:.2f} seconds\n\n"
+            
+            if cleanup_actions:
+                cleanup_summary += f"Cleanup Actions Performed ({len(cleanup_actions)}):" + "\n"
+                for action in cleanup_actions:
+                    cleanup_summary += f"  ✓ {action}\n"
+            
+            if cleanup_errors:
+                cleanup_summary += f"\nCleanup Errors ({len(cleanup_errors)}):" + "\n"
+                for error in cleanup_errors:
+                    cleanup_summary += f"  ❌ {error}\n"
+            
+            cleanup_summary += f"\nCleanup completed at: {cleanup_end}\n"
+            
+            # Store cleanup documentation in database
+            self.db.add_document(
+                build_id, 'log', 'Automatic Build Cleanup',
+                cleanup_summary,
+                {
+                    'cleanup': True,
+                    'trigger': reason,
+                    'status': status,
+                    'duration_seconds': cleanup_duration,
+                    'actions_count': len(cleanup_actions),
+                    'errors_count': len(cleanup_errors),
+                    'success': len(cleanup_errors) == 0
+                }
+            )
+            
+            print(f"✅ Automatic cleanup completed for build {build_id}")
+            print(f"   Actions: {len(cleanup_actions)}, Errors: {len(cleanup_errors)}, Duration: {cleanup_duration:.2f}s")
+            
+        except Exception as e:
+            error_msg = f"Critical error during automatic cleanup: {str(e)}"
+            print(f"❌ {error_msg}")
+            
+            # Document cleanup failure
+            try:
+                self.db.add_document(
+                    build_id, 'error', 'Cleanup Failed',
+                    f"Automatic cleanup failed for build {build_id}\n\n"
+                    f"Error: {str(e)}\n"
+                    f"Trigger: {reason}\n"
+                    f"Status: {status}\n"
+                    f"Time: {datetime.now()}",
+                    {
+                        'cleanup': True,
+                        'cleanup_failed': True,
+                        'trigger': reason,
+                        'status': status,
+                        'exception_type': type(e).__name__
+                    }
+                )
+            except Exception as db_error:
+                print(f"Failed to document cleanup failure: {db_error}")
