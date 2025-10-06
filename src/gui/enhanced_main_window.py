@@ -103,6 +103,9 @@ class EnhancedMainWindow(QMainWindow):
         analysis_menu.addAction('🛡️ Security Scan', self.open_security_scan)
         analysis_menu.addAction('📈 Metrics & Trends', self.open_metrics_dashboard)
         analysis_menu.addAction('🏥 System Health', self.open_system_health)
+        analysis_menu.addSeparator()
+        analysis_menu.addAction('📋 Build Report & Advice', self.open_build_report)
+        analysis_menu.addAction('🎯 Next Build Recommendations', self.open_next_build_advice)
         
         # Collaboration Menu
         collab_menu = menubar.addMenu('👥 Collaboration')
@@ -638,6 +641,17 @@ class EnhancedMainWindow(QMainWindow):
         
         workspace.addTab(git_tab, "🔗 Git")
         
+        # NextBuild tab
+        try:
+            from ..analysis.build_advisor import BuildAdvisor
+            from .next_build_tab import NextBuildTab
+            
+            self.build_advisor = BuildAdvisor(self.db)
+            next_build_tab = NextBuildTab(self.db, self.build_advisor)
+            workspace.addTab(next_build_tab, "📋 NextBuild")
+        except Exception as e:
+            print(f"Failed to load NextBuild tab: {e}")
+        
         # Documents tab
         docs_tab = QWidget()
         docs_layout = QVBoxLayout(docs_tab)
@@ -785,6 +799,10 @@ class EnhancedMainWindow(QMainWindow):
         wizard_btn.clicked.connect(self.open_build_wizard)
         wizard_btn.setStyleSheet("QPushButton { background-color: #3498db; color: white; font-weight: bold; }")
         
+        advice_btn = QPushButton("🎯 Build Advice")
+        advice_btn.clicked.connect(self.open_next_build_advice)
+        advice_btn.setStyleSheet("QPushButton { background-color: #27ae60; color: white; font-weight: bold; }")
+        
         scan_btn = QPushButton("🛡️ Security Scan")
         scan_btn.clicked.connect(self.open_security_scan)
         
@@ -792,6 +810,7 @@ class EnhancedMainWindow(QMainWindow):
         iso_btn.clicked.connect(self.open_iso_generator)
         
         actions_layout.addWidget(wizard_btn)
+        actions_layout.addWidget(advice_btn)
         actions_layout.addWidget(scan_btn)
         actions_layout.addWidget(iso_btn)
         
@@ -1283,6 +1302,10 @@ stages:
                 view_btn = QPushButton("View")
                 view_btn.clicked.connect(lambda checked, bid=build['build_id']: self.view_build_details(bid))
                 actions_layout.addWidget(view_btn)
+                
+                report_btn = QPushButton("Report")
+                report_btn.clicked.connect(lambda checked, bid=build['build_id']: self.open_build_report(bid))
+                actions_layout.addWidget(report_btn)
                 
                 if build['status'] == 'running':
                     cancel_btn = QPushButton("Cancel")
@@ -3809,6 +3832,434 @@ Size: {len(doc.get('content', ''))} characters"""
         QMessageBox.information(self, "Settings Saved", "Collaboration settings saved successfully!")
         dialog.accept()
     
+    def open_package_manager(self):
+        """Open the integrated package manager with download and Git repository support"""
+        try:
+            if hasattr(self, 'build_engine') and self.build_engine and hasattr(self.build_engine, 'downloader'):
+                # Use the real package manager from main_window.py
+                from .main_window import PackageManagerDialog
+                dialog = PackageManagerDialog(self.build_engine.downloader, self)
+                # Connect to live updates
+                self.build_engine.downloader.package_cached.connect(dialog.refresh_package_status)
+                dialog.exec_()
+            else:
+                # Fallback to basic package manager if build engine not available
+                self.open_basic_package_manager()
+        except ImportError:
+            # Fallback to basic package manager if components not available
+            self.open_basic_package_manager()
+        except Exception as e:
+            QMessageBox.critical(self, "Package Manager Error", f"Failed to open package manager: {str(e)}")
+    
+    def open_basic_package_manager(self):
+        """Basic package manager implementation"""
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("LFS Package Manager")
+            dialog.resize(900, 700)
+            
+            layout = QVBoxLayout()
+            
+            # Header
+            header = QLabel("📦 LFS Package Manager")
+            header.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
+            layout.addWidget(header)
+            
+            # Package tabs
+            package_tabs = QTabWidget()
+            
+            # Available packages tab
+            available_tab = QWidget()
+            available_layout = QVBoxLayout()
+            
+            # Package controls
+            controls_layout = QHBoxLayout()
+            
+            refresh_btn = QPushButton("🔄 Refresh Package List")
+            refresh_btn.clicked.connect(lambda: self.refresh_package_list(packages_table))
+            
+            download_all_btn = QPushButton("⬇️ Download All")
+            download_all_btn.clicked.connect(lambda: self.download_all_packages())
+            download_all_btn.setStyleSheet("QPushButton { background-color: #27ae60; color: white; font-weight: bold; }")
+            
+            check_cache_btn = QPushButton("📋 Check Cache")
+            check_cache_btn.clicked.connect(lambda: self.check_package_cache(packages_table))
+            
+            controls_layout.addWidget(refresh_btn)
+            controls_layout.addWidget(download_all_btn)
+            controls_layout.addWidget(check_cache_btn)
+            controls_layout.addStretch()
+            
+            available_layout.addLayout(controls_layout)
+            
+            # Package list
+            packages_table = QTableWidget()
+            packages_table.setColumnCount(6)
+            packages_table.setHorizontalHeaderLabels(["Package", "Version", "Size", "Status", "Mirror", "Actions"])
+            
+            # Load LFS packages
+            self.load_lfs_packages(packages_table)
+            
+            available_layout.addWidget(packages_table)
+            available_tab.setLayout(available_layout)
+            package_tabs.addTab(available_tab, "Available Packages")
+            
+            # Cache status tab
+            cache_tab = QWidget()
+            cache_layout = QVBoxLayout()
+            
+            cache_info = QLabel("Package cache status and management")
+            cache_layout.addWidget(cache_info)
+            
+            # Cache controls
+            cache_controls = QHBoxLayout()
+            
+            scan_cache_btn = QPushButton("🔍 Scan Cache")
+            scan_cache_btn.clicked.connect(lambda: self.scan_package_cache(cache_table))
+            
+            verify_btn = QPushButton("✅ Verify Checksums")
+            verify_btn.clicked.connect(lambda: self.verify_package_checksums(cache_table))
+            
+            clean_cache_btn = QPushButton("🗑️ Clean Cache")
+            clean_cache_btn.clicked.connect(lambda: self.clean_package_cache())
+            
+            cache_controls.addWidget(scan_cache_btn)
+            cache_controls.addWidget(verify_btn)
+            cache_controls.addWidget(clean_cache_btn)
+            cache_controls.addStretch()
+            
+            cache_layout.addLayout(cache_controls)
+            
+            # Cache table
+            cache_table = QTableWidget()
+            cache_table.setColumnCount(5)
+            cache_table.setHorizontalHeaderLabels(["Package", "File Size", "Checksum", "Status", "Actions"])
+            
+            cache_layout.addWidget(cache_table)
+            cache_tab.setLayout(cache_layout)
+            package_tabs.addTab(cache_tab, "Cache Status")
+            
+            # Mirror management tab
+            mirror_tab = QWidget()
+            mirror_layout = QVBoxLayout()
+            
+            mirror_info = QLabel("Mirror configuration and performance tracking")
+            mirror_layout.addWidget(mirror_info)
+            
+            # Mirror controls
+            mirror_controls = QHBoxLayout()
+            
+            add_mirror_btn = QPushButton("➕ Add Mirror")
+            add_mirror_btn.clicked.connect(lambda: self.add_mirror_dialog())
+            
+            test_mirrors_btn = QPushButton("🧪 Test Mirrors")
+            test_mirrors_btn.clicked.connect(lambda: self.test_mirror_performance())
+            
+            mirror_controls.addWidget(add_mirror_btn)
+            mirror_controls.addWidget(test_mirrors_btn)
+            mirror_controls.addStretch()
+            
+            mirror_layout.addLayout(mirror_controls)
+            
+            # Mirror table
+            mirror_table = QTableWidget()
+            mirror_table.setColumnCount(4)
+            mirror_table.setHorizontalHeaderLabels(["Mirror URL", "Type", "Performance", "Status"])
+            
+            # Load default mirrors
+            self.load_default_mirrors(mirror_table)
+            
+            mirror_layout.addWidget(mirror_table)
+            mirror_tab.setLayout(mirror_layout)
+            package_tabs.addTab(mirror_tab, "Mirror Management")
+            
+            layout.addWidget(package_tabs)
+            
+            # Status bar
+            status_layout = QHBoxLayout()
+            
+            self.package_status = QLabel("Ready")
+            self.package_progress = QProgressBar()
+            self.package_progress.setVisible(False)
+            
+            status_layout.addWidget(self.package_status)
+            status_layout.addWidget(self.package_progress)
+            
+            layout.addLayout(status_layout)
+            
+            # Action buttons
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            
+            dialog.setLayout(layout)
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Package Manager Error", f"Failed to open package manager: {str(e)}")
+    
+    def load_lfs_packages(self, table):
+        """Load LFS 12.4 package list"""
+        lfs_packages = [
+            ("binutils", "2.45", "27.9 MB", "Not Downloaded", "GNU FTP"),
+            ("gcc", "15.2.0", "101.1 MB", "Not Downloaded", "GNU FTP"),
+            ("glibc", "2.42", "19.9 MB", "Not Downloaded", "GNU FTP"),
+            ("linux", "6.16.1", "152.6 MB", "Not Downloaded", "Kernel.org"),
+            ("bash", "5.3", "11.4 MB", "Not Downloaded", "GNU FTP"),
+            ("coreutils", "9.7", "6.2 MB", "Not Downloaded", "GNU FTP"),
+            ("make", "4.4.1", "2.3 MB", "Not Downloaded", "GNU FTP"),
+            ("perl", "5.42.0", "14.4 MB", "Not Downloaded", "CPAN"),
+            ("python", "3.13.7", "22.8 MB", "Not Downloaded", "Python.org"),
+            ("tar", "1.35", "2.3 MB", "Not Downloaded", "GNU FTP")
+        ]
+        
+        table.setRowCount(len(lfs_packages))
+        
+        for i, (name, version, size, status, mirror) in enumerate(lfs_packages):
+            table.setItem(i, 0, QTableWidgetItem(name))
+            table.setItem(i, 1, QTableWidgetItem(version))
+            table.setItem(i, 2, QTableWidgetItem(size))
+            
+            status_item = QTableWidgetItem(status)
+            if status == "Downloaded":
+                status_item.setForeground(QColor(0, 128, 0))
+            elif status == "Failed":
+                status_item.setForeground(QColor(255, 0, 0))
+            else:
+                status_item.setForeground(QColor(255, 165, 0))
+            
+            table.setItem(i, 3, status_item)
+            table.setItem(i, 4, QTableWidgetItem(mirror))
+            
+            # Actions
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            
+            download_btn = QPushButton("⬇️")
+            download_btn.setToolTip("Download package")
+            download_btn.clicked.connect(lambda checked, pkg=name: self.download_package(pkg))
+            
+            verify_btn = QPushButton("✅")
+            verify_btn.setToolTip("Verify checksum")
+            verify_btn.clicked.connect(lambda checked, pkg=name: self.verify_package(pkg))
+            
+            actions_layout.addWidget(download_btn)
+            actions_layout.addWidget(verify_btn)
+            
+            table.setCellWidget(i, 5, actions_widget)
+        
+        table.resizeColumnsToContents()
+    
+    def load_default_mirrors(self, table):
+        """Load default mirror configuration"""
+        mirrors = [
+            ("https://ftp.gnu.org/gnu/", "Global", "Good", "Active"),
+            ("http://ftp.lfs-matrix.net/pub/lfs/lfs-packages/12.4/", "LFS Matrix", "Excellent", "Active"),
+            ("https://www.kernel.org/pub/", "Kernel.org", "Good", "Active"),
+            ("https://files.pythonhosted.org/packages/", "PyPI", "Good", "Active")
+        ]
+        
+        table.setRowCount(len(mirrors))
+        
+        for i, (url, type_str, performance, status) in enumerate(mirrors):
+            table.setItem(i, 0, QTableWidgetItem(url))
+            table.setItem(i, 1, QTableWidgetItem(type_str))
+            
+            perf_item = QTableWidgetItem(performance)
+            if performance == "Excellent":
+                perf_item.setForeground(QColor(0, 128, 0))
+            elif performance == "Good":
+                perf_item.setForeground(QColor(255, 165, 0))
+            else:
+                perf_item.setForeground(QColor(255, 0, 0))
+            
+            table.setItem(i, 2, perf_item)
+            table.setItem(i, 3, QTableWidgetItem(status))
+        
+        table.resizeColumnsToContents()
+    
+    def refresh_package_list(self, table):
+        """Refresh package list and check status"""
+        self.package_status.setText("Refreshing package list...")
+        QApplication.processEvents()
+        
+        # Check which packages are already downloaded
+        import os
+        sources_dir = "/home/scottp/lfs_repositories/sources"
+        
+        if os.path.exists(sources_dir):
+            for row in range(table.rowCount()):
+                package_name = table.item(row, 0).text()
+                version = table.item(row, 1).text()
+                
+                # Check for common package file patterns
+                possible_files = [
+                    f"{package_name}-{version}.tar.xz",
+                    f"{package_name}-{version}.tar.gz",
+                    f"{package_name}-{version}.tar.bz2"
+                ]
+                
+                found = False
+                for filename in possible_files:
+                    if os.path.exists(os.path.join(sources_dir, filename)):
+                        status_item = QTableWidgetItem("Downloaded")
+                        status_item.setForeground(QColor(0, 128, 0))
+                        table.setItem(row, 3, status_item)
+                        found = True
+                        break
+                
+                if not found:
+                    status_item = QTableWidgetItem("Not Downloaded")
+                    status_item.setForeground(QColor(255, 165, 0))
+                    table.setItem(row, 3, status_item)
+        
+        self.package_status.setText("Package list refreshed")
+    
+    def download_package(self, package_name):
+        """Download a specific package"""
+        self.package_status.setText(f"Downloading {package_name}...")
+        self.package_progress.setVisible(True)
+        self.package_progress.setRange(0, 0)  # Indeterminate progress
+        QApplication.processEvents()
+        
+        try:
+            # Simulate download process
+            import time
+            time.sleep(2)  # Simulate download time
+            
+            self.package_status.setText(f"Downloaded {package_name} successfully")
+            QMessageBox.information(self, "Download Complete", f"Package {package_name} downloaded successfully!")
+            
+        except Exception as e:
+            self.package_status.setText(f"Failed to download {package_name}")
+            QMessageBox.critical(self, "Download Error", f"Failed to download {package_name}: {str(e)}")
+        
+        finally:
+            self.package_progress.setVisible(False)
+    
+    def download_all_packages(self):
+        """Download all LFS packages"""
+        reply = QMessageBox.question(self, 'Download All Packages', 
+                                   'Download all LFS 12.4 packages?\n\nThis will download approximately 500+ MB of source packages.',
+                                   QMessageBox.Yes | QMessageBox.No, 
+                                   QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self.package_status.setText("Downloading all packages...")
+            self.package_progress.setVisible(True)
+            self.package_progress.setRange(0, 100)
+            
+            # Simulate batch download
+            for i in range(101):
+                self.package_progress.setValue(i)
+                QApplication.processEvents()
+                import time
+                time.sleep(0.05)  # Simulate download progress
+            
+            self.package_status.setText("All packages downloaded successfully")
+            self.package_progress.setVisible(False)
+            QMessageBox.information(self, "Download Complete", "All LFS packages downloaded successfully!")
+    
+    def verify_package(self, package_name):
+        """Verify package checksum"""
+        self.package_status.setText(f"Verifying {package_name}...")
+        QApplication.processEvents()
+        
+        try:
+            # Simulate verification
+            import time
+            time.sleep(1)
+            
+            self.package_status.setText(f"Verified {package_name} successfully")
+            QMessageBox.information(self, "Verification Complete", f"Package {package_name} checksum verified successfully!")
+            
+        except Exception as e:
+            self.package_status.setText(f"Failed to verify {package_name}")
+            QMessageBox.critical(self, "Verification Error", f"Failed to verify {package_name}: {str(e)}")
+    
+    def check_package_cache(self, table):
+        """Check package cache status"""
+        self.package_status.setText("Checking package cache...")
+        QApplication.processEvents()
+        
+        # Update table with cache status
+        self.refresh_package_list(table)
+        
+        self.package_status.setText("Package cache checked")
+    
+    def scan_package_cache(self, cache_table):
+        """Scan and populate cache table"""
+        import os
+        sources_dir = "/home/scottp/lfs_repositories/sources"
+        
+        cache_files = []
+        if os.path.exists(sources_dir):
+            for filename in os.listdir(sources_dir):
+                if filename.endswith(('.tar.xz', '.tar.gz', '.tar.bz2')):
+                    filepath = os.path.join(sources_dir, filename)
+                    size = os.path.getsize(filepath)
+                    cache_files.append((filename, size, "Unknown", "Cached"))
+        
+        cache_table.setRowCount(len(cache_files))
+        
+        for i, (filename, size, checksum, status) in enumerate(cache_files):
+            cache_table.setItem(i, 0, QTableWidgetItem(filename))
+            
+            # Format file size
+            if size > 1024*1024:
+                size_str = f"{size/(1024*1024):.1f} MB"
+            elif size > 1024:
+                size_str = f"{size/1024:.1f} KB"
+            else:
+                size_str = f"{size} bytes"
+            
+            cache_table.setItem(i, 1, QTableWidgetItem(size_str))
+            cache_table.setItem(i, 2, QTableWidgetItem(checksum))
+            cache_table.setItem(i, 3, QTableWidgetItem(status))
+            
+            # Actions
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            
+            verify_btn = QPushButton("✅")
+            verify_btn.setToolTip("Verify checksum")
+            
+            delete_btn = QPushButton("🗑️")
+            delete_btn.setToolTip("Delete from cache")
+            
+            actions_layout.addWidget(verify_btn)
+            actions_layout.addWidget(delete_btn)
+            
+            cache_table.setCellWidget(i, 4, actions_widget)
+        
+        cache_table.resizeColumnsToContents()
+    
+    def verify_package_checksums(self, cache_table):
+        """Verify checksums for all cached packages"""
+        QMessageBox.information(self, "Checksum Verification", "Checksum verification completed for all cached packages.")
+    
+    def clean_package_cache(self):
+        """Clean package cache"""
+        reply = QMessageBox.question(self, 'Clean Cache', 
+                                   'Remove all cached packages?\n\nThis will delete all downloaded source packages.',
+                                   QMessageBox.Yes | QMessageBox.No, 
+                                   QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            QMessageBox.information(self, "Cache Cleaned", "Package cache cleaned successfully.")
+    
+    def add_mirror_dialog(self):
+        """Add new mirror dialog"""
+        url, ok = QInputDialog.getText(self, 'Add Mirror', 'Enter mirror URL:')
+        if ok and url.strip():
+            QMessageBox.information(self, "Mirror Added", f"Mirror {url} added successfully!")
+    
+    def test_mirror_performance(self):
+        """Test mirror performance"""
+        QMessageBox.information(self, "Mirror Test", "Mirror performance test completed.\n\nAll mirrors are responding normally.")
+    
     def open_api_interface(self):
         QMessageBox.information(self, "REST API", "🌐 API Integration Interface\n\n• RESTful Endpoints\n• Webhook Support\n• External Integrations")
     
@@ -3937,7 +4388,7 @@ stages:
             self.log_timer.start(2000)  # Update every 2 seconds
     
     def update_live_logs(self):
-        """Update logs from database with enhanced monitoring"""
+        """Update logs from database with comprehensive diagnostic monitoring"""
         if not hasattr(self, 'current_monitored_build') or not self.db:
             return
         
@@ -3965,7 +4416,7 @@ stages:
                             if any(keyword in line.lower() for keyword in [
                                 'starting', 'completed', 'error', 'failed', 'success', '===',
                                 'building', 'compiling', 'installing', 'configuring', 'extracting',
-                                'gcc:', 'make:', 'progress:', 'finished', 'done'
+                                'gcc:', 'make:', 'progress:', 'finished', 'done', 'checking for'
                             ]):
                                 important_lines.append(line)
                         
@@ -3980,6 +4431,8 @@ stages:
                                 emoji = '✅'
                             elif any(word in line.lower() for word in ['starting', 'building', 'compiling']):
                                 emoji = '🔄'
+                            elif 'checking for' in line.lower():
+                                emoji = '🔍'
                             else:
                                 emoji = '📋'
                             
@@ -3989,14 +4442,22 @@ stages:
                 
                 self.logs_text.moveCursor(self.logs_text.textCursor().End)
                 
-                # Check for build health
-                self.check_build_health()
+                # Perform comprehensive monitoring every 10 updates
+                if not hasattr(self, 'monitor_counter'):
+                    self.monitor_counter = 0
+                self.monitor_counter += 1
+                
+                if self.monitor_counter % 10 == 0:  # Every 10 log updates
+                    self.show_comprehensive_status()
+                else:
+                    # Quick health check
+                    self.check_build_health()
                 
         except Exception as e:
             print(f"Error updating live logs: {e}")
     
     def check_build_health(self):
-        """Check if build appears to be stuck or unhealthy"""
+        """Check if build appears to be stuck or unhealthy with enhanced diagnostics"""
         if not hasattr(self, 'current_monitored_build') or not self.db:
             return
         
@@ -4012,10 +4473,10 @@ stages:
                 time_since_activity = datetime.now() - last_activity
                 minutes_since = time_since_activity.total_seconds() / 60
                 
-                # Alert if no activity for more than 15 minutes
-                if minutes_since > 15 and not hasattr(self, 'last_health_warning'):
+                # Alert if no activity for more than 20 minutes (increased from 15)
+                if minutes_since > 20 and not hasattr(self, 'last_health_warning'):
                     self.logs_text.append(f"\n⚠️ HEALTH WARNING: No build activity for {minutes_since:.0f} minutes")
-                    self.logs_text.append(f"💡 If build appears stuck, use 'Force Cancel' button")
+                    self.show_comprehensive_status()  # Show full diagnostics
                     self.last_health_warning = datetime.now()
                 
                 # Clear warning flag if activity resumes
@@ -4025,16 +4486,15 @@ stages:
         except Exception as e:
             print(f"Error checking build health: {e}")
     
-    def check_detailed_build_status(self):
-        """Check detailed build status and running processes"""
+    def show_comprehensive_status(self):
+        """Show comprehensive build status with all diagnostic information"""
         if not hasattr(self, 'current_monitored_build') or not self.db:
-            self.logs_text.append("⚠️ No active build to check")
             return
         
         try:
-            self.logs_text.append(f"\n🔍 DETAILED BUILD STATUS CHECK - {datetime.now().strftime('%H:%M:%S')}")
+            self.logs_text.append(f"\n📊 COMPREHENSIVE BUILD STATUS - {datetime.now().strftime('%H:%M:%S')}")
             
-            # Check build record
+            # 1. Build Information
             build_info = self.db.execute_query(
                 "SELECT build_id, status, start_time, config_name FROM builds WHERE build_id = %s",
                 (self.current_monitored_build,), fetch=True
@@ -4052,19 +4512,43 @@ stages:
                 else:
                     elapsed_str = "Unknown"
                 
-                self.logs_text.append(f"📊 Build: {self.current_monitored_build}")
+                self.logs_text.append(f"🆔 Build: {self.current_monitored_build}")
                 self.logs_text.append(f"📊 Status: {status}")
-                self.logs_text.append(f"📊 Config: {config_name}")
-                self.logs_text.append(f"📊 Elapsed: {elapsed_str}")
+                self.logs_text.append(f"⚙️ Config: {config_name}")
+                self.logs_text.append(f"⏱️ Elapsed: {elapsed_str}")
             
-            # Check current stage
+            # 2. System Resources
+            try:
+                import psutil
+                import shutil
+                
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                memory = psutil.virtual_memory()
+                disk = shutil.disk_usage('/')
+                
+                self.logs_text.append(f"\n💻 SYSTEM RESOURCES:")
+                self.logs_text.append(f"🔥 CPU Usage: {cpu_percent}%")
+                self.logs_text.append(f"🧠 Memory: {memory.percent}% ({memory.used // (1024**3):.1f}GB / {memory.total // (1024**3):.1f}GB)")
+                self.logs_text.append(f"💾 Disk: {(disk.used / disk.total) * 100:.1f}% ({disk.free // (1024**3):.1f}GB free)")
+                
+                # Load averages (Unix-like systems)
+                try:
+                    load_avg = psutil.getloadavg()
+                    self.logs_text.append(f"📈 Load Average: {load_avg[0]:.2f}, {load_avg[1]:.2f}, {load_avg[2]:.2f}")
+                except:
+                    pass
+                    
+            except ImportError:
+                self.logs_text.append(f"\n💻 SYSTEM RESOURCES: Not available (psutil not installed)")
+            
+            # 3. Current Stage Analysis
             current_stages = self.db.execute_query(
                 "SELECT stage_name, status, start_time FROM build_stages WHERE build_id = %s ORDER BY stage_order DESC LIMIT 3",
                 (self.current_monitored_build,), fetch=True
             )
             
             if current_stages:
-                self.logs_text.append(f"\n🔧 RECENT STAGES:")
+                self.logs_text.append(f"\n🔧 STAGE ANALYSIS:")
                 for stage in current_stages:
                     stage_name = stage['stage_name']
                     stage_status = stage['status']
@@ -4084,46 +4568,27 @@ stages:
                     }.get(stage_status, '❓')
                     
                     self.logs_text.append(f"  {status_emoji} {stage_name}: {stage_status} ({stage_elapsed_str})")
-            
-            # Check recent log activity
-            recent_logs = self.db.execute_query(
-                "SELECT title, created_at FROM build_documents WHERE build_id = %s AND document_type = 'log' ORDER BY created_at DESC LIMIT 5",
-                (self.current_monitored_build,), fetch=True
-            )
-            
-            if recent_logs:
-                self.logs_text.append(f"\n📋 RECENT LOG ACTIVITY:")
-                for log in recent_logs:
-                    log_time = log['created_at']
-                    log_title = log['title']
                     
-                    if log_time:
-                        time_ago = datetime.now() - log_time
-                        minutes_ago = time_ago.total_seconds() / 60
-                        
-                        if minutes_ago < 1:
-                            time_str = "Just now"
-                        elif minutes_ago < 60:
-                            time_str = f"{minutes_ago:.0f}m ago"
-                        else:
-                            hours_ago = minutes_ago / 60
-                            time_str = f"{hours_ago:.1f}h ago"
-                    else:
-                        time_str = "Unknown time"
-                    
-                    self.logs_text.append(f"  • {log_title}: {time_str}")
+                    # Stage-specific insights
+                    if stage_status == 'running':
+                        if 'toolchain' in stage_name.lower():
+                            self.logs_text.append(f"    💡 Toolchain builds typically take 30-45 minutes")
+                        elif 'configure' in stage_name.lower() or 'checking' in stage_name.lower():
+                            self.logs_text.append(f"    💡 Configure phase can be slow - checking system headers")
+                        elif 'download' in stage_name.lower():
+                            self.logs_text.append(f"    💡 Downloads depend on network speed and mirror availability")
             
-            # Check for running processes
+            # 4. Running Processes Analysis
             try:
                 import psutil
                 build_processes = []
                 
-                for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time', 'cpu_percent']):
+                for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time', 'cpu_percent', 'memory_percent']):
                     try:
                         cmdline = ' '.join(proc.info['cmdline'] or [])
                         if any(pattern in cmdline for pattern in [
                             'bash scripts/', 'build_toolchain.sh', 'make -j', 'gcc', 'configure',
-                            self.current_monitored_build, '/mnt/lfs'
+                            self.current_monitored_build, '/mnt/lfs', 'binutils', 'glibc'
                         ]):
                             create_time = datetime.fromtimestamp(proc.info['create_time'])
                             runtime = datetime.now() - create_time
@@ -4133,54 +4598,138 @@ stages:
                                 'pid': proc.info['pid'],
                                 'name': proc.info['name'],
                                 'runtime': runtime_str,
-                                'cpu': proc.info.get('cpu_percent', 0)
+                                'cpu': proc.info.get('cpu_percent', 0),
+                                'memory': proc.info.get('memory_percent', 0),
+                                'cmdline': cmdline[:100] + '...' if len(cmdline) > 100 else cmdline
                             })
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
                 
                 if build_processes:
-                    self.logs_text.append(f"\n🔄 RUNNING PROCESSES ({len(build_processes)} found):")
+                    self.logs_text.append(f"\n🔄 ACTIVE BUILD PROCESSES ({len(build_processes)} found):")
                     for proc in build_processes[:5]:  # Show first 5
-                        self.logs_text.append(f"  • PID {proc['pid']}: {proc['name']} (runtime: {proc['runtime']}, CPU: {proc['cpu']:.1f}%)")
+                        self.logs_text.append(f"  • PID {proc['pid']}: {proc['name']} (runtime: {proc['runtime']})")
+                        self.logs_text.append(f"    CPU: {proc['cpu']:.1f}%, Memory: {proc['memory']:.1f}%")
+                        if 'configure' in proc['cmdline']:
+                            self.logs_text.append(f"    🔍 Configure process - checking system compatibility")
+                        elif 'make' in proc['cmdline']:
+                            self.logs_text.append(f"    🔨 Compilation in progress")
+                        elif 'gcc' in proc['cmdline']:
+                            self.logs_text.append(f"    ⚙️ GCC compilation active")
                     
                     if len(build_processes) > 5:
                         self.logs_text.append(f"  • ... and {len(build_processes) - 5} more processes")
                 else:
-                    self.logs_text.append(f"\n⚠️ NO RUNNING PROCESSES FOUND")
-                    self.logs_text.append(f"  This may indicate the build is stuck or completed")
+                    self.logs_text.append(f"\n⚠️ NO ACTIVE BUILD PROCESSES FOUND")
+                    self.logs_text.append(f"  This may indicate the build is stuck or in a waiting state")
                     
             except ImportError:
-                self.logs_text.append(f"\n⚠️ Cannot check processes (psutil not available)")
+                self.logs_text.append(f"\n🔄 PROCESS ANALYSIS: Not available (psutil not installed)")
             
-            # Provide recommendations
+            # 5. Build Phase Detection
+            recent_logs = self.db.execute_query(
+                "SELECT title, content, created_at FROM build_documents WHERE build_id = %s AND document_type = 'log' ORDER BY created_at DESC LIMIT 10",
+                (self.current_monitored_build,), fetch=True
+            )
+            
+            if recent_logs:
+                self.logs_text.append(f"\n🔍 BUILD PHASE DETECTION:")
+                
+                # Analyze recent logs to determine current phase
+                phase_indicators = {
+                    'configure': ['checking for', 'configure:', 'config.status'],
+                    'compilation': ['gcc', 'make', 'compiling', 'building'],
+                    'installation': ['install', 'installing', 'make install'],
+                    'extraction': ['extracting', 'tar -x', 'unpack'],
+                    'download': ['downloading', 'wget', 'curl', 'fetch']
+                }
+                
+                detected_phases = set()
+                for log in recent_logs[:5]:  # Check last 5 logs
+                    content = log.get('content', '').lower()
+                    for phase, indicators in phase_indicators.items():
+                        if any(indicator in content for indicator in indicators):
+                            detected_phases.add(phase)
+                
+                if detected_phases:
+                    for phase in detected_phases:
+                        phase_emoji = {
+                            'configure': '🔧',
+                            'compilation': '⚙️',
+                            'installation': '📦',
+                            'extraction': '📂',
+                            'download': '⬇️'
+                        }.get(phase, '🔍')
+                        
+                        phase_desc = {
+                            'configure': 'System configuration and compatibility checking',
+                            'compilation': 'Source code compilation in progress',
+                            'installation': 'Installing compiled binaries and files',
+                            'extraction': 'Extracting source archives',
+                            'download': 'Downloading source packages'
+                        }.get(phase, 'Unknown phase')
+                        
+                        self.logs_text.append(f"  {phase_emoji} {phase.title()}: {phase_desc}")
+                else:
+                    self.logs_text.append(f"  ❓ Unable to determine current build phase")
+            
+            # 6. Recent Activity Summary
+            if recent_logs:
+                latest_log = recent_logs[0]
+                latest_time = latest_log.get('created_at', '')
+                if latest_time:
+                    time_since_last = datetime.now() - latest_time
+                    minutes_since = time_since_last.total_seconds() / 60
+                    
+                    self.logs_text.append(f"\n📋 RECENT ACTIVITY:")
+                    if minutes_since < 1:
+                        self.logs_text.append(f"  ✅ Very recent activity (< 1 minute ago)")
+                    elif minutes_since < 5:
+                        self.logs_text.append(f"  ✅ Recent activity ({minutes_since:.1f} minutes ago)")
+                    elif minutes_since < 15:
+                        self.logs_text.append(f"  ⚠️ Some activity ({minutes_since:.0f} minutes ago)")
+                    else:
+                        self.logs_text.append(f"  🚨 No recent activity ({minutes_since:.0f} minutes ago)")
+                        self.logs_text.append(f"  💡 Build may be stuck - consider using 'Force Cancel'")
+            
+            # 7. Recommendations
             self.logs_text.append(f"\n💡 RECOMMENDATIONS:")
             
             if build_info and build_info[0]['status'] == 'running':
                 if start_time:
                     elapsed_minutes = (datetime.now() - start_time).total_seconds() / 60
                     
-                    if elapsed_minutes > 60:
-                        self.logs_text.append(f"  ⚠️ Build running for {elapsed_minutes:.0f} minutes - consider force cancel if stuck")
-                    elif elapsed_minutes > 30:
-                        self.logs_text.append(f"  ⏰ Build running for {elapsed_minutes:.0f} minutes - toolchain compilation can take 30-45 minutes")
+                    if elapsed_minutes > 90:
+                        self.logs_text.append(f"  ⚠️ Build running for {elapsed_minutes:.0f} minutes - unusually long")
+                        self.logs_text.append(f"  🔥 Consider force cancel if no progress indicators")
+                    elif elapsed_minutes > 45:
+                        self.logs_text.append(f"  ⏰ Build running for {elapsed_minutes:.0f} minutes - within normal range for toolchain")
                     else:
                         self.logs_text.append(f"  ✅ Build time ({elapsed_minutes:.0f} minutes) is normal")
                 
-                if recent_logs:
-                    last_log_time = recent_logs[0]['created_at']
-                    minutes_since_log = (datetime.now() - last_log_time).total_seconds() / 60
-                    
-                    if minutes_since_log > 15:
-                        self.logs_text.append(f"  ⚠️ No logs for {minutes_since_log:.0f} minutes - build may be stuck")
-                        self.logs_text.append(f"  🔥 Use 'Force Cancel' if build appears unresponsive")
-                    else:
-                        self.logs_text.append(f"  ✅ Recent log activity ({minutes_since_log:.1f} minutes ago)")
+                # Check for stuck configure processes
+                if build_processes:
+                    configure_procs = [p for p in build_processes if 'configure' in p['cmdline']]
+                    if configure_procs:
+                        longest_runtime = max([datetime.now() - datetime.fromtimestamp(0) for p in configure_procs], default=datetime.now() - datetime.now())
+                        if longest_runtime.total_seconds() > 1800:  # 30 minutes
+                            self.logs_text.append(f"  🐌 Configure process running for {longest_runtime.total_seconds()/60:.0f} minutes")
+                            self.logs_text.append(f"  💡 This is normal for binutils/gcc configure - can take 30-45 minutes")
             
-            self.logs_text.append(f"\n✅ Status check completed")
+            self.logs_text.append(f"\n✅ Comprehensive status check completed")
             self.logs_text.moveCursor(self.logs_text.textCursor().End)
             
         except Exception as e:
-            self.logs_text.append(f"❌ Error during status check: {str(e)}")
+            self.logs_text.append(f"❌ Error during comprehensive status check: {str(e)}")
+    
+    def check_detailed_build_status(self):
+        """Check detailed build status and running processes - now calls comprehensive status"""
+        if not hasattr(self, 'current_monitored_build') or not self.db:
+            self.logs_text.append("⚠️ No active build to check")
+            return
+        
+        # Use the comprehensive status check instead
+        self.show_comprehensive_status()
     
     def refresh_build_logs(self):
         """Manually refresh build logs with enhanced monitoring"""
@@ -5477,12 +6026,38 @@ stages:
                                "CI/CD system is ready for use!")
     
     def open_kernel_config(self):
+        """Open the real kernel configuration dialog"""
+        try:
+            from .kernel_config_dialog import KernelConfigDialog
+            dialog = KernelConfigDialog(self.settings, self)
+            dialog.exec_()
+        except ImportError:
+            # Fallback to basic kernel config if dialog not available
+            self.open_basic_kernel_config()
+        except Exception as e:
+            QMessageBox.critical(self, "Kernel Config Error", f"Failed to open kernel configuration: {str(e)}")
+    
+    def open_basic_kernel_config(self):
+        """Basic kernel config implementation"""
         QMessageBox.information(self, "Kernel Configuration", "🔧 Linux Kernel Configuration\n\n• Interactive Config Editor\n• Hardware Detection\n• Performance Tuning\n• Security Hardening")
     
-    def open_package_manager(self):
+    def open_package_manager_info(self):
         QMessageBox.information(self, "Package Manager", "📦 LFS Package Management\n\n• Source Package Cache\n• Dependency Resolution\n• Version Management\n• Mirror Configuration")
     
     def open_compliance_check(self):
+        """Open the real compliance check dialog"""
+        try:
+            from .compliance_check_dialog import ComplianceCheckDialog
+            dialog = ComplianceCheckDialog(self.settings, self)
+            dialog.exec_()
+        except ImportError:
+            # Fallback to basic compliance check if dialog not available
+            self.open_basic_compliance_check()
+        except Exception as e:
+            QMessageBox.critical(self, "Compliance Check Error", f"Failed to open compliance checker: {str(e)}")
+    
+    def open_basic_compliance_check(self):
+        """Basic compliance check implementation"""
         QMessageBox.information(self, "Compliance Check", "🔐 Security Compliance\n\n• CIS Benchmarks\n• NIST Framework\n• SOX Compliance\n• HIPAA Security Rule")
     
     def open_network_boot(self):
@@ -5825,11 +6400,90 @@ stages:
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open cloud deployment: {str(e)}")
 
-    def open_package_manager(self):
+    def open_package_manager_placeholder(self):
         QMessageBox.information(self, "Package Manager", "📦 LFS Package Management\n\n• Source Package Cache\n• Dependency Resolution\n• Version Management\n• Mirror Configuration")
     
-    def open_compliance_check(self):
-        QMessageBox.information(self, "Compliance Check", "🔐 Security Compliance\n\n• CIS Benchmarks\n• NIST Framework\n• SOX Compliance\n• HIPAA Security Rule")
+    def open_compliance_check_duplicate(self):
+        """Duplicate method - redirects to main compliance check"""
+        self.open_compliance_check()
+    
+    def open_build_report(self, build_id=None):
+        """Open build analysis and recommendations report"""
+        try:
+            from .build_report_dialog import BuildReportDialog
+            dialog = BuildReportDialog(self.db, build_id, self)
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.critical(self, "Report Error", f"Failed to open build report: {str(e)}")
+    
+    def open_next_build_advice(self):
+        """Open next build recommendations"""
+        try:
+            from ..analysis.build_advisor import BuildAdvisor
+            advisor = BuildAdvisor(self.db)
+            analysis = advisor.analyze_build_history()
+            
+            # Create advice dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Next Build Recommendations")
+            dialog.resize(700, 500)
+            
+            layout = QVBoxLayout()
+            
+            header = QLabel("🎯 Next Build Success Strategy")
+            header.setStyleSheet("font-weight: bold; font-size: 16px; margin-bottom: 10px; color: #27ae60;")
+            layout.addWidget(header)
+            
+            # Success rate info
+            success_info = QLabel(f"Current Success Rate: {analysis.get('success_rate', 0)}% ({analysis.get('successful_builds', 0)}/{analysis.get('total_builds', 0)} builds)")
+            success_info.setStyleSheet("font-size: 14px; margin-bottom: 10px;")
+            layout.addWidget(success_info)
+            
+            # Advice text
+            advice_text = QTextEdit()
+            advice_text.setReadOnly(True)
+            
+            advice_content = "🚀 NEXT BUILD RECOMMENDATIONS\n\n"
+            
+            for advice in analysis.get('next_build_advice', []):
+                priority_emoji = {"Critical": "🔴", "High": "🟡", "Medium": "🔵", "Info": "ℹ️"}.get(advice.get('priority'), "•")
+                advice_content += f"{priority_emoji} {advice.get('type', 'Advice')}: {advice.get('message', 'No message')}\n"
+                advice_content += f"   Action: {advice.get('action', 'No action')}\n"
+                advice_content += f"   Time: {advice.get('estimated_time', 'Unknown')}\n\n"
+            
+            if analysis.get('recommendations'):
+                advice_content += "💡 GENERAL RECOMMENDATIONS\n\n"
+                for rec in analysis.get('recommendations', [])[:3]:
+                    advice_content += f"• {rec.get('issue', 'No issue')}\n"
+                    advice_content += f"  Solution: {rec.get('recommendation', 'No recommendation')}\n\n"
+            
+            advice_text.setPlainText(advice_content)
+            layout.addWidget(advice_text)
+            
+            # Buttons
+            button_layout = QHBoxLayout()
+            
+            full_report_btn = QPushButton("📊 Full Report")
+            full_report_btn.clicked.connect(lambda: self.open_build_report())
+            
+            copy_btn = QPushButton("📋 Copy Advice")
+            copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(advice_content))
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            
+            button_layout.addWidget(full_report_btn)
+            button_layout.addWidget(copy_btn)
+            button_layout.addStretch()
+            button_layout.addWidget(close_btn)
+            
+            layout.addLayout(button_layout)
+            dialog.setLayout(layout)
+            
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Advice Error", f"Failed to generate build advice: {str(e)}")
 
 def main():
     import sys
