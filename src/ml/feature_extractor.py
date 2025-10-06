@@ -19,20 +19,21 @@ class FeatureExtractor:
         self.db = db_manager
         self.logger = logging.getLogger(__name__)
     
-    def extract_build_features(self, build_id: Optional[str] = None) -> List[Dict]:
+    def extract_build_features(self, build_id: Optional[str] = None) -> Dict:
         """Extract comprehensive features for builds"""
         try:
             if build_id:
                 # Extract features for specific build
                 features = self._extract_single_build_features(build_id)
-                return [features] if features else []
+                return features if features else {}
             else:
                 # Extract features for recent builds
-                return self._extract_recent_build_features()
+                recent_features = self._extract_recent_build_features()
+                return {"recent_builds": recent_features} if recent_features else {}
                 
         except Exception as e:
             self.logger.error(f"Feature extraction failed: {e}")
-            return []
+            return {}
     
     def _extract_single_build_features(self, build_id: str) -> Optional[Dict]:
         """Extract comprehensive features for a specific build"""

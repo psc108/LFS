@@ -48,8 +48,23 @@ class MLStatusTab(QWidget):
         # Tabs for different ML views
         tab_widget = QTabWidget()
         
+        # System status tab
+        self.system_status_tab = QWidget()
+        system_status_layout = QVBoxLayout()
+        
+        system_refresh_btn = QPushButton("🔄 Refresh System Status")
+        system_refresh_btn.clicked.connect(self.update_system_status)
+        system_status_layout.addWidget(system_refresh_btn)
+        
+        self.system_status_text = QTextEdit()
+        self.system_status_text.setReadOnly(True)
+        system_status_layout.addWidget(self.system_status_text)
+        
+        self.system_status_tab.setLayout(system_status_layout)
+        tab_widget.addTab(self.system_status_tab, "System Status")
+        
         # Insights tab
-        insights_tab = QWidget()
+        self.insights_tab = QWidget()
         insights_layout = QVBoxLayout()
         
         refresh_btn = QPushButton("🔄 Refresh Insights")
@@ -60,11 +75,11 @@ class MLStatusTab(QWidget):
         self.insights_text.setReadOnly(True)
         insights_layout.addWidget(self.insights_text)
         
-        insights_tab.setLayout(insights_layout)
-        tab_widget.addTab(insights_tab, "System Insights")
+        self.insights_tab.setLayout(insights_layout)
+        tab_widget.addTab(self.insights_tab, "System Insights")
         
         # Predictions tab
-        predictions_tab = QWidget()
+        self.predictions_tab = QWidget()
         predictions_layout = QVBoxLayout()
         
         predict_btn = QPushButton("🎯 Run Prediction Test")
@@ -75,11 +90,11 @@ class MLStatusTab(QWidget):
         self.predictions_text.setReadOnly(True)
         predictions_layout.addWidget(self.predictions_text)
         
-        predictions_tab.setLayout(predictions_layout)
-        tab_widget.addTab(predictions_tab, "Predictions")
+        self.predictions_tab.setLayout(predictions_layout)
+        tab_widget.addTab(self.predictions_tab, "Predictions")
         
         # Model status tab
-        models_tab = QWidget()
+        self.models_tab = QWidget()
         models_layout = QVBoxLayout()
         
         # Training controls
@@ -109,8 +124,8 @@ class MLStatusTab(QWidget):
         self.models_text.setReadOnly(True)
         models_layout.addWidget(self.models_text)
         
-        models_tab.setLayout(models_layout)
-        tab_widget.addTab(models_tab, "Model Status")
+        self.models_tab.setLayout(models_layout)
+        tab_widget.addTab(self.models_tab, "Model Status")
         
         layout.addWidget(tab_widget)
         
@@ -339,3 +354,44 @@ class MLStatusTab(QWidget):
             self.ml_engine.configure_auto_training(training_interval_hours=hours)
         except Exception as e:
             print(f"Error updating training interval: {e}")
+    
+    def update_system_status(self):
+        """Update system status tab"""
+        if not self.ml_engine:
+            self.system_status_text.setText("ML Engine not available")
+            return
+            
+        try:
+            health = self.ml_engine.get_health_status()
+            accuracy = self.ml_engine.get_prediction_accuracy()
+            
+            output = "🤖 ML System Status\n"
+            output += "=" * 50 + "\n\n"
+            
+            output += f"Overall Health: {health.get('overall_health', 'Unknown')}\n"
+            output += f"Database Connection: {health.get('database_connection', 'Unknown')}\n"
+            output += f"Models Loaded: {health.get('components', {}).get('models_loaded', 0)}\n"
+            output += f"Enabled Models: {', '.join(health.get('enabled_models', []))}\n\n"
+            
+            output += "Prediction Accuracy:\n"
+            output += f"  Failure Prediction: {accuracy.get('failure_prediction_accuracy', 0):.1%}\n"
+            output += f"  Performance Prediction: {accuracy.get('performance_prediction_accuracy', 0):.1%}\n"
+            output += f"  Anomaly Detection: {accuracy.get('anomaly_detection_accuracy', 0):.1%}\n"
+            output += f"  Total Predictions: {accuracy.get('total_predictions', 0)}\n"
+            
+            self.system_status_text.setText(output)
+            
+        except Exception as e:
+            self.system_status_text.setText(f"Error updating system status: {e}")
+    
+    def update_insights(self):
+        """Update insights tab"""
+        self.refresh_insights()
+    
+    def update_predictions(self):
+        """Update predictions tab"""
+        self.run_prediction_test()
+    
+    def update_models(self):
+        """Update models tab"""
+        self.train_models()

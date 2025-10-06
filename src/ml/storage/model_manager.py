@@ -225,16 +225,23 @@ class ModelManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
     
-    def get_model_versions(self) -> Dict:
+    def get_model_versions(self, model_name: Optional[str] = None) -> List[str]:
         """Get model versions - interface method for ML engine"""
         try:
-            versions = {}
-            for model_name in self.registry["models"]:
-                model_versions = self.registry["models"][model_name]["versions"]
-                versions[model_name] = [v["version"] for v in model_versions]
-            
-            return versions
+            if model_name:
+                # Return versions for specific model
+                if model_name in self.registry["models"]:
+                    model_versions = self.registry["models"][model_name]["versions"]
+                    return [v["version"] for v in model_versions]
+                return []
+            else:
+                # Return all versions for all models
+                all_versions = []
+                for model_name in self.registry["models"]:
+                    model_versions = self.registry["models"][model_name]["versions"]
+                    all_versions.extend([v["version"] for v in model_versions])
+                return all_versions
             
         except Exception as e:
             self.logger.error(f"Failed to get model versions: {e}")
-            return {}
+            return []

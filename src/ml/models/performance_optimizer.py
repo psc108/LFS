@@ -287,9 +287,12 @@ class PerformanceOptimizer:
         
         return True
     
-    def get_recommendations(self, perf_data: Dict) -> Optional[Dict]:
+    def get_recommendations(self, perf_data: Dict) -> List[str]:
         """Get performance recommendations - interface method for tests"""
-        return self.optimize(perf_data)
+        optimization = self.optimize(perf_data)
+        if optimization and 'changes' in optimization:
+            return [change.get('description', 'Performance optimization available') for change in optimization['changes']]
+        return ["No specific optimizations identified", "Consider monitoring build performance over time"]
     
     def calculate_efficiency_score(self, perf_data: Dict) -> float:
         """Calculate efficiency score for performance data"""

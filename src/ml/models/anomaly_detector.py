@@ -302,11 +302,14 @@ class AnomalyDetector:
         
         return True
     
-    def detect_anomalies(self, metrics: Dict) -> Optional[Dict]:
+    def detect_anomalies(self, metrics: Dict) -> List[Dict]:
         """Detect anomalies - interface method for tests"""
-        return self.detect(metrics)
+        detection_result = self.detect(metrics)
+        if detection_result and 'anomalies_detected' in detection_result:
+            return detection_result['anomalies_detected']
+        return []
     
-    def check_realtime_anomaly(self, current_metrics: Dict) -> Optional[Dict]:
+    def check_realtime_anomaly(self, current_metrics: Dict) -> bool:
         """Check for real-time anomalies in current metrics"""
         try:
             # Convert single metrics to expected format
@@ -320,11 +323,12 @@ class AnomalyDetector:
             if current_metrics.get('disk_io', 0) > 400:
                 system_metrics['resource_warnings'] += 1
             
-            return self.detect(system_metrics)
+            detection_result = self.detect(system_metrics)
+            return detection_result is not None and detection_result.get('anomaly_score', 0) > 0.3
             
         except Exception as e:
             self.logger.error(f"Real-time anomaly check failed: {e}")
-            return None
+            return False
     
     def train(self) -> Dict:
         """Train the anomaly detector"""

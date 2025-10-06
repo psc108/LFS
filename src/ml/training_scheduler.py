@@ -98,6 +98,7 @@ class TrainingScheduler:
     def get_training_status(self) -> Dict:
         """Get current training scheduler status"""
         return {
+            'is_running': self.running,
             'scheduler_running': self.running,
             'auto_training_enabled': self.config['auto_training_enabled'],
             'last_training': self.last_training_time.isoformat() if self.last_training_time else None,
@@ -107,6 +108,42 @@ class TrainingScheduler:
             'training_interval_hours': self.config['training_interval_hours'],
             'config': self.config
         }
+    
+    def get_training_history(self) -> List[Dict]:
+        """Get training history from database"""
+        try:
+            # Get training logs from build documents
+            training_logs = self.db_manager.execute_query(
+                """SELECT bd.content, bd.created_at, b.build_id
+                   FROM build_documents bd
+                   JOIN builds b ON bd.build_id = b.build_id
+                   WHERE bd.title = 'ML Training Log'
+                   AND bd.document_type = 'log'
+                   ORDER BY bd.created_at DESC
+                   LIMIT 50""",
+                fetch=True
+            )
+            
+            history = []
+            for log in training_logs:
+                try:
+                    training_data = json.loads(log['content'])
+                    history.append({
+                        'timestamp': log['created_at'],
+                        'build_id': log['build_id'],
+                        'type': training_data.get('type', 'unknown'),
+                        'results': training_data.get('results', {}),
+                        'builds_processed': training_data.get('builds_processed', 0)
+                    })
+                except json.JSONDecodeError:
+                    # Skip invalid JSON entries
+                    continue
+            
+            return history
+            
+        except Exception as e:
+            self.logger.error(f"Error getting training history: {e}")
+            return []
         
     def _scheduler_loop(self):
         """Main scheduler loop"""
@@ -272,3 +309,8 @@ class TrainingScheduler:
                 callback(event_type, data)
             except Exception as e:
                 self.logger.error(f"Callback error: {e}")
+    
+    @property
+    def training_interval(self) -> int:
+        """Get training interval in hours"""
+        return self.config['training_interval_hours']

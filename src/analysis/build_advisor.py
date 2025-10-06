@@ -498,3 +498,67 @@ class BuildAdvisor:
             """, (report_id, access_type))
         except Exception as e:
             print(f"Failed to log report access: {e}")
+    
+    def analyze_build_with_ml(self, build_id: int) -> Optional[Dict]:
+        """Analyze build using ML engine integration"""
+        try:
+            # Try to import and use ML engine
+            from ml.ml_engine import MLEngine
+            
+            ml_engine = MLEngine(self.db_manager)
+            
+            if not ml_engine.is_enabled():
+                return None
+            
+            # Get ML insights for the build
+            ml_insights = ml_engine.get_ml_insights(str(build_id))
+            
+            if ml_insights and ml_insights.get('ml_enabled'):
+                analysis = {
+                    'ml_enabled': True,
+                    'build_id': build_id,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                # Extract insights
+                insights = ml_insights.get('insights', {})
+                
+                # Failure prediction
+                if 'failure_prediction' in insights:
+                    fp = insights['failure_prediction']
+                    analysis['failure_risk'] = fp.get('risk_score', 0) * 100
+                    analysis['failure_confidence'] = fp.get('confidence', 0)
+                    analysis['failure_recommendations'] = fp.get('recommendations', [])
+                
+                # Performance optimization
+                if 'performance_optimization' in insights:
+                    po = insights['performance_optimization']
+                    analysis['performance_score'] = po.get('expected_improvement', 0)
+                    analysis['performance_changes'] = po.get('changes', [])
+                
+                # Anomaly detection
+                if 'anomaly_detection' in insights:
+                    ad = insights['anomaly_detection']
+                    analysis['anomalies'] = ad.get('anomalies_detected', [])
+                    analysis['anomaly_severity'] = ad.get('severity', 'normal')
+                
+                # Combine recommendations
+                all_recommendations = []
+                all_recommendations.extend(analysis.get('failure_recommendations', []))
+                
+                for change in analysis.get('performance_changes', []):
+                    if isinstance(change, dict) and 'description' in change:
+                        all_recommendations.append(change['description'])
+                
+                analysis['recommendations'] = all_recommendations
+                
+                return analysis
+            
+            return None
+            
+        except ImportError:
+            # ML engine not available
+            return None
+        except Exception as e:
+            print(f"ML analysis failed: {e}")
+            return None

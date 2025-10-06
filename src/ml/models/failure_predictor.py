@@ -444,9 +444,12 @@ class FailurePredictor:
         
         return True
     
-    def predict_failure_risk(self, build_data: Dict) -> Optional[Dict]:
+    def predict_failure_risk(self, build_data: Dict) -> float:
         """Predict failure risk - interface method for tests"""
-        return self.predict(build_data)
+        prediction = self.predict(build_data)
+        if prediction and 'risk_score' in prediction:
+            return prediction['risk_score'] * 100  # Return as percentage 0-100
+        return 0.0
     
     def predict_batch(self, batch_data: List[Dict]) -> List[Optional[Dict]]:
         """Predict failure risk for batch of build data"""
