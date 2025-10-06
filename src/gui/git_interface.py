@@ -57,7 +57,8 @@ class GitCommitGraphWidget(QWidget):
             font.setPointSize(8)
             painter.setFont(font)
             painter.setPen(QPen(QColor(100, 100, 100)))
-            author_text = f"{commit['author']} - {commit['date'].strftime('%Y-%m-%d %H:%M')}"
+            date_str = commit['date'].strftime('%Y-%m-%d %H:%M') if hasattr(commit['date'], 'strftime') else str(commit['date'])
+            author_text = f"{commit['author']} - {date_str}"
             painter.drawText(25, y + 18, author_text)
 
 class GitStatusWidget(QWidget):
@@ -402,7 +403,9 @@ class GitTagWidget(QWidget):
     def update_tags(self, tags: List[Dict]):
         self.tag_list.clear()
         for tag in tags:
-            text = f"{tag['name']} ({tag['date'].strftime('%Y-%m-%d')})"
+            # Handle datetime conversion safely
+            date_str = tag['date'].strftime('%Y-%m-%d') if hasattr(tag['date'], 'strftime') else str(tag['date'])
+            text = f"{tag['name']} ({date_str})"
             if 'message' in tag:
                 text += f" - {tag['message'][:50]}"
             item = QListWidgetItem(text)

@@ -89,6 +89,13 @@ A native GUI build system for Linux From Scratch with MySQL backend, integrated 
    - Intelligent build advisor with database-driven recommendations
    - Comprehensive build reporting with export capabilities
 
+8. **Machine Learning Engine** (`src/ml/`)
+   - Intelligent failure prediction based on historical patterns
+   - Performance optimization recommendations
+   - System anomaly detection during builds
+   - Feature extraction from build database
+   - Model training and lifecycle management
+
 6. **CI/CD Pipeline System** (`src/cicd/`)
    - In-house pipeline engine with Git integration
    - Automated pipeline triggering on Git operations

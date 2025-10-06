@@ -1,0 +1,28 @@
+{
+  "enabled": true,
+  "models": {
+    "failure_predictor": {
+      "enabled": true,
+      "retrain_interval": 24,
+      "min_training_samples": 10
+    },
+    "performance_optimizer": {
+      "enabled": true,
+      "retrain_interval": 48,
+      "min_training_samples": 5
+    },
+    "anomaly_detector": {
+      "enabled": true,
+      "retrain_interval": 72,
+      "min_training_samples": 20
+    }
+  },
+  "feature_extraction": {
+    "batch_size": 100,
+    "lookback_days": 30
+  },
+  "prediction": {
+    "confidence_threshold": 0.7,
+    "cache_predictions": true
+  }
+}

@@ -9,6 +9,7 @@ class BuildAdvisor:
     
     def __init__(self, db_manager):
         self.db = db_manager
+        # Store database manager reference
         self.db_manager = db_manager
     
     def analyze_build_history(self, limit=50):
@@ -44,13 +45,8 @@ class BuildAdvisor:
             }
             
             # Calculate average duration
-            successful_durations = []
-            for b in builds:
-                if b['status'] == 'success' and b['duration_seconds']:
-                    # Convert decimal.Decimal to float
-                    duration = float(b['duration_seconds']) if b['duration_seconds'] else 0
-                    successful_durations.append(duration)
-            
+            successful_durations = [float(b['duration_seconds']) for b in builds 
+                                  if b['status'] == 'success' and b['duration_seconds']]
             if successful_durations:
                 analysis['avg_duration_minutes'] = sum(successful_durations) / len(successful_durations) / 60
             
@@ -287,6 +283,51 @@ class BuildAdvisor:
             ]
         }
     
+    def generate_build_report(self, build_id):
+        """Generate comprehensive build report"""
+        try:
+            # Get build details
+            build = self.db.execute_query("""
+                SELECT * FROM builds WHERE build_id = %s
+            """, (build_id,), fetch=True)
+            
+            if not build:
+                return {'error': f'Build {build_id} not found'}
+            
+            build = build[0]
+            
+            # Get build stages
+            stages = self.db.execute_query("""
+                SELECT * FROM build_stages 
+                WHERE build_id = %s 
+                ORDER BY stage_order
+            """, (build_id,), fetch=True)
+            
+            # Get build documents
+            documents = self.db.execute_query("""
+                SELECT document_type, title, LENGTH(content) as size, created_at
+                FROM build_documents 
+                WHERE build_id = %s 
+                ORDER BY created_at
+            """, (build_id,), fetch=True)
+            
+            # Generate analysis
+            analysis = self.analyze_build_history()
+            
+            report = {
+                'build_info': build,
+                'stages': stages,
+                'documents': documents,
+                'analysis': analysis,
+                'generated_at': datetime.now().isoformat(),
+                'recommendations': self._generate_build_specific_recommendations(build, stages)
+            }
+            
+            return report
+            
+        except Exception as e:
+            return {'error': f"Failed to generate build report: {str(e)}"}
+    
     def generate_build_advice(self, build_id: Optional[int] = None) -> Dict:
         """Generate comprehensive build advice based on database analysis"""
         try:
@@ -306,6 +347,11 @@ class BuildAdvisor:
                 }
             }
             
+            # Integrate ML insights if available
+            ml_insights = self._get_ml_insights(build_id)
+            if ml_insights:
+                advice['ml_insights'] = ml_insights
+            
             # Store comprehensive report in database
             self._store_comprehensive_report(advice, build_id)
             
@@ -320,43 +366,43 @@ class BuildAdvisor:
     def _store_comprehensive_report(self, advice: Dict, build_id: Optional[int] = None):
         """Store comprehensive report in database with full output preservation"""
         try:
-            with self.db_manager.get_connection() as conn:
-                cursor = conn.cursor()
-                
-                # Generate comprehensive output text
-                full_output = self._generate_full_report_text(advice)
-                
-                # Calculate report size
-                report_size = len(full_output.encode('utf-8'))
-                
-                # Generate report title
-                success_rate = advice.get('success_metrics', {}).get('overall_success_rate', 0)
-                title = f"Build Analysis Report - {success_rate:.1f}% Success Rate - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                
-                # Insert comprehensive report
-                insert_query = """
-                    INSERT INTO next_build_reports 
-                    (build_id, report_title, total_builds_analyzed, success_rate, avg_build_duration,
-                     full_analysis_output, failure_patterns_json, recommendations_json, 
-                     next_build_advice_json, report_size_bytes)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """
-                
-                cursor.execute(insert_query, (
-                    build_id,
-                    title,
-                    advice.get('analysis', {}).get('total_builds', 0),
-                    success_rate,
-                    float(advice.get('analysis', {}).get('avg_duration_minutes', 0) or 0),
-                    full_output,
-                    json.dumps(advice.get('failure_patterns', [])),
-                    json.dumps(advice.get('recommendations', [])),
-                    json.dumps(advice.get('next_build_advice', [])),
-                    report_size
-                ))
-                
-                conn.commit()
-                
+            cursor = self.connection.cursor()
+            
+            # Generate comprehensive output text
+            full_output = self._generate_full_report_text(advice)
+            
+            # Calculate report size
+            report_size = len(full_output.encode('utf-8'))
+            
+            # Generate report title
+            success_rate = advice.get('success_metrics', {}).get('overall_success_rate', 0)
+            title = f"Build Analysis Report - {success_rate:.1f}% Success Rate - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            
+            # Insert comprehensive report
+            insert_query = """
+                INSERT INTO next_build_reports 
+                (build_id, report_title, total_builds_analyzed, success_rate, avg_build_duration,
+                 full_analysis_output, failure_patterns_json, recommendations_json, 
+                 next_build_advice_json, report_size_bytes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            cursor.execute(insert_query, (
+                build_id,
+                title,
+                advice.get('analysis', {}).get('total_builds', 0),
+                success_rate,
+float(advice.get('analysis', {}).get('avg_duration_minutes', 0)),
+                full_output,
+                json.dumps(advice.get('failure_patterns', [])),
+                json.dumps(advice.get('recommendations', [])),
+                json.dumps(advice.get('next_build_advice', [])),
+                report_size
+            ))
+            
+            self.connection.commit()
+            cursor.close()
+            
         except Exception as e:
             print(f"Failed to store comprehensive report: {e}")
     
@@ -439,62 +485,151 @@ class BuildAdvisor:
         
         return "\n".join(lines)
     
-    def get_all_reports(self):
-        """Get all stored build analysis reports"""
+    def get_all_reports(self) -> List[Dict]:
+        """Get all stored next build reports"""
         try:
-            return self.db.execute_query("""
-                SELECT * FROM next_build_reports 
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute("""
+                SELECT id, build_id, report_title, generated_at, 
+                       total_builds_analyzed, success_rate, avg_build_duration,
+                       report_size_bytes, export_count, last_accessed
+                FROM next_build_reports 
                 ORDER BY generated_at DESC
-            """, fetch=True)
-        except Exception as e:
-            print(f"Failed to get all reports: {e}")
-            return []
-    
-    def search_reports(self, search_term: str):
-        """Search reports by title or content"""
-        try:
-            return self.db.execute_query("""
-                SELECT * FROM next_build_reports 
-                WHERE report_title LIKE %s OR full_analysis_output LIKE %s
-                ORDER BY generated_at DESC
-            """, (f"%{search_term}%", f"%{search_term}%"), fetch=True)
-        except Exception as e:
-            print(f"Failed to search reports: {e}")
-            return []
-    
-    def get_report_details(self, report_id: int):
-        """Get detailed report by ID"""
-        try:
-            reports = self.db.execute_query("""
-                SELECT * FROM next_build_reports WHERE id = %s
-            """, (report_id,), fetch=True)
+            """)
             
-            if reports:
+            reports = cursor.fetchall()
+            cursor.close()
+            return reports
+            
+        except Exception as e:
+            print(f"Failed to get reports: {e}")
+            return []
+    
+    def get_report_details(self, report_id: int) -> Optional[Dict]:
+        """Get full report details including analysis output"""
+        try:
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute("""
+                SELECT * FROM next_build_reports WHERE id = %s
+            """, (report_id,))
+            
+            report = cursor.fetchone()
+            cursor.close()
+            
+            if report:
                 # Log access
                 self._log_report_access(report_id, 'view')
-                return reports[0]
-            return None
+                
+            return report
+            
         except Exception as e:
             print(f"Failed to get report details: {e}")
             return None
     
-    def delete_report(self, report_id: int) -> bool:
-        """Delete a report by ID"""
+    def _log_report_access(self, report_id: int, access_type: str):
+        """Log report access for tracking"""
         try:
-            result = self.db.execute_query("""
-                DELETE FROM next_build_reports WHERE id = %s
-            """, (report_id,))
-            return result > 0
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                INSERT INTO report_access_log (report_id, access_type, user_context)
+                VALUES (%s, %s, %s)
+            """, (report_id, access_type, 'GUI_User'))
+            
+            self.connection.commit()
+            cursor.close()
+            
+        except Exception as e:
+            print(f"Failed to log report access: {e}")
+    
+    def delete_report(self, report_id: int) -> bool:
+        """Delete a report from database"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("DELETE FROM next_build_reports WHERE id = %s", (report_id,))
+            self.connection.commit()
+            cursor.close()
+            return True
+            
         except Exception as e:
             print(f"Failed to delete report: {e}")
             return False
     
-    def _log_report_access(self, report_id: int, access_type: str):
-        """Log report access for analytics"""
+    def search_reports(self, search_term: str) -> List[Dict]:
+        """Search reports by title or content"""
         try:
-            self.db.execute_query("""
-                INSERT INTO report_access_log (report_id, access_type, access_time)
-                VALUES (%s, %s, NOW())
-            """, (report_id, access_type))
+            cursor = self.connection.cursor(dictionary=True)
+            cursor.execute("""
+                SELECT id, build_id, report_title, generated_at, 
+                       total_builds_analyzed, success_rate, avg_build_duration,
+                       report_size_bytes, export_count, last_accessed
+                FROM next_build_reports 
+                WHERE MATCH(full_analysis_output, report_title) AGAINST(%s IN NATURAL LANGUAGE MODE)
+                ORDER BY generated_at DESC
+            """, (search_term,))
+            
+            reports = cursor.fetchall()
+            cursor.close()
+            return reports
+            
         except Exception as e:
-            print(f"Failed to log report access: {e}")
+            print(f"Failed to search reports: {e}")
+            return []
+    
+    def _get_ml_insights(self, build_id: Optional[int] = None) -> Optional[Dict]:
+        """Get ML insights if ML engine is available"""
+        try:
+            import sys
+            import os
+            
+            # Add src directory to path for ML imports
+            src_path = os.path.join(os.path.dirname(__file__), '..')
+            if src_path not in sys.path:
+                sys.path.insert(0, src_path)
+            
+            from ml import ML_AVAILABLE, MLEngine
+            
+            if not ML_AVAILABLE:
+                return None
+            
+            # Initialize ML engine
+            ml_engine = MLEngine(self.db)
+            
+            if not ml_engine.is_enabled():
+                return None
+            
+            # Get ML insights for the build
+            if build_id:
+                insights = ml_engine.get_ml_insights(str(build_id))
+                return insights
+            else:
+                # Get system-wide insights if no specific build
+                system_insights = ml_engine.get_system_wide_insights()
+                return system_insights
+            
+        except Exception as e:
+            print(f"ML insights unavailable: {e}")
+            return None
+    
+    def _generate_build_specific_recommendations(self, build, stages):
+        """Generate recommendations specific to this build"""
+        recommendations = []
+        
+        if build['status'] == 'failed':
+            failed_stages = [s for s in stages if s['status'] == 'failed']
+            for stage in failed_stages:
+                recommendations.append({
+                    'type': 'Fix Required',
+                    'stage': stage['stage_name'],
+                    'issue': stage.get('error_message', 'Stage failed'),
+                    'recommendation': self._get_stage_specific_fix(stage['stage_name'], stage.get('error_message'))
+                })
+        
+        elif build['status'] == 'success':
+            recommendations.append({
+                'type': 'Success',
+                'stage': 'All',
+                'issue': 'Build completed successfully',
+                'recommendation': 'Configuration can be reused for future builds'
+            })
+        
+        return recommendations

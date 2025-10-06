@@ -127,6 +127,11 @@ class EnhancedMainWindow(QMainWindow):
         tools_menu.addAction('📦 Package Manager', self.open_package_manager)
         tools_menu.addAction('🔐 Compliance Check', self.open_compliance_check)
         tools_menu.addAction('🌐 Network Boot', self.open_network_boot)
+        
+        # Settings Menu
+        settings_menu = menubar.addMenu('⚙️ Settings')
+        settings_menu.addAction('💾 Storage Manager', self.open_storage_manager)
+        settings_menu.addAction('🔧 System Settings', self.open_system_settings)
     
     def create_enhanced_toolbar(self):
         toolbar = self.addToolBar('Quick Actions')
@@ -469,6 +474,14 @@ class EnhancedMainWindow(QMainWindow):
         integration_layout.addWidget(integration_content)
         
         workspace.addTab(integration_tab, "🔗 Integration")
+        
+        # ML Status tab
+        try:
+            from .ml_status_tab import MLStatusTab
+            ml_tab = MLStatusTab(self.db)
+            workspace.addTab(ml_tab, "🤖 ML Status")
+        except Exception as e:
+            print(f"Failed to load ML Status tab: {e}")
         
         # Settings tab
         settings_tab = QWidget()
@@ -4259,6 +4272,19 @@ Size: {len(doc.get('content', ''))} characters"""
     def test_mirror_performance(self):
         """Test mirror performance"""
         QMessageBox.information(self, "Mirror Test", "Mirror performance test completed.\n\nAll mirrors are responding normally.")
+        
+    def open_storage_manager(self):
+        """Open storage manager dialog"""
+        try:
+            from .storage_manager import StorageManagerDialog
+            dialog = StorageManagerDialog(self)
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to open storage manager: {e}")
+            
+    def open_system_settings(self):
+        """Open system settings dialog"""
+        QMessageBox.information(self, "System Settings", "System configuration settings available here.")
     
     def open_api_interface(self):
         QMessageBox.information(self, "REST API", "🌐 API Integration Interface\n\n• RESTful Endpoints\n• Webhook Support\n• External Integrations")
