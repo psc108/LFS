@@ -285,7 +285,9 @@ class TrainingScheduler:
             }
             
             # Create a training build record first
-            build_id = f"ml_training_{int(datetime.now().timestamp())}"
+            import uuid
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            build_id = f"ml_training_{timestamp}_{str(uuid.uuid4())[:8]}"
             
             # Create build record
             self.db_manager.execute_query("""

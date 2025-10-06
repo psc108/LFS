@@ -27,6 +27,24 @@ class EnhancedMainWindow(QMainWindow):
             self.settings = SettingsManager()
             self.current_build_id = None
             
+            # Initialize ML engine with Stage 4 components and internet solution research
+            try:
+                from ..ml.ml_engine import MLEngine
+                self.ml_engine = MLEngine(self.db)
+                print("✅ ML Engine with Stage 4 analysis and internet solution research initialized")
+            except Exception as e:
+                print(f"⚠️ ML Engine initialization failed: {e}")
+                self.ml_engine = None
+            
+            # Initialize ML solution integration
+            try:
+                from .ml_solution_integration import MLSolutionIntegration
+                self.ml_solutions = MLSolutionIntegration(self)
+                print("✅ ML Solution Integration initialized")
+            except Exception as e:
+                print(f"⚠️ ML Solution Integration failed: {e}")
+                self.ml_solutions = None
+            
             # Create thread-safe signals
             self.build_signals = BuildSignals()
             self.build_signals.stage_started.connect(self.on_stage_start)
@@ -489,7 +507,7 @@ class EnhancedMainWindow(QMainWindow):
         
         workspace.addTab(integration_tab, "🔗 Integration")
         
-        # ML Status tab
+        # ML Status tab with Stage 4 components
         try:
             from .ml_status_tab import MLStatusTab
             ml_tab = MLStatusTab(self.db)
@@ -951,11 +969,11 @@ class EnhancedMainWindow(QMainWindow):
                     from ..ml.ml_engine import MLEngine
                     from ..ml.optimization.build_wizard import MLBuildWizard
                     
-                    # Initialize ML engine if not already done
-                    if not hasattr(self, 'ml_engine'):
+                    # Use existing ML engine or initialize new one
+                    if not hasattr(self, 'ml_engine') or not self.ml_engine:
                         self.ml_engine = MLEngine(self.db)
                     
-                    # Open ML-optimized build wizard
+                    # Open ML-optimized build wizard with Stage 4 capabilities
                     ml_wizard = MLBuildWizard(self, self.db, self.ml_engine)
                     ml_wizard.exec_()
                     return
@@ -1217,10 +1235,13 @@ stages:
             QLineEdit.Password
         )
         
+        print(f"Debug: Password dialog result - ok: {ok}, password provided: {bool(password)}")
+        
         if ok and password:
             self.build_engine.set_sudo_password(password)
-            print(f"🔐 Sudo password provided for LFS build")
+            print(f"🔐 Sudo password provided for LFS build (length: {len(password)})")
         else:
+            print(f"Debug: No password provided - ok: {ok}, password: '{password}'")
             reply = QMessageBox.question(
                 self, 'Continue Without Sudo?', 
                 'No sudo password provided. Build will likely fail due to permission issues.\n\nContinue anyway?',
@@ -1234,6 +1255,15 @@ stages:
         build_id = self.build_engine.start_build(config_path, build_name)
         print(f"🆔 Started REAL LFS build with ID: {build_id}")
         self.current_build_id = build_id
+        self.current_monitored_build = build_id  # Set monitored build
+        
+        # Start ML monitoring for the build
+        if self.ml_engine:
+            try:
+                self.ml_engine.start_build_monitoring(build_id)
+                print(f"🤖 Started ML monitoring for build {build_id}")
+            except Exception as e:
+                print(f"⚠️ ML monitoring failed to start: {e}")
         
         # Update dashboard immediately
         self.build_id_label.setText(f"Build ID: {build_id}")
@@ -1254,8 +1284,9 @@ stages:
                                        f"\n⚠️  This is a REAL build that will take hours to complete!\n"
                                        f"\n📋 Live logs will appear below as build progresses...\n")
             
-            # Start live log monitoring timer
-            self.start_live_log_monitoring(build_id)
+            # Start auto-refresh for live monitoring
+            if not self.auto_refresh_timer.isActive():
+                self.auto_refresh_timer.start(2000)  # Refresh every 2 seconds
             
             # Initial log refresh
             QTimer.singleShot(1000, self.refresh_build_logs)  # Refresh after 1 second
@@ -1552,6 +1583,14 @@ stages:
                                        QMessageBox.No)
             
             if reply == QMessageBox.Yes:
+                # Stop ML monitoring first
+                if self.ml_engine:
+                    try:
+                        self.ml_engine.stop_build_monitoring(self.current_build_id)
+                        print(f"🤖 Stopped ML monitoring for build {self.current_build_id}")
+                    except Exception as e:
+                        print(f"⚠️ Failed to stop ML monitoring: {e}")
+                
                 self.build_engine.cancel_build(self.current_build_id)
                 self.build_status_label.setText("Status: Cancelled")
                 self.cancel_build_btn.setEnabled(False)
@@ -5774,6 +5813,34 @@ stages:
             except ImportError:
                 self.logs_text.append(f"\n🔄 PROCESS ANALYSIS: Not available (psutil not installed)")
             
+            # 4. Sudo Stuck Detection
+            try:
+                sudo_errors = self.db.execute_query(
+                    "SELECT content, created_at FROM build_documents WHERE build_id = %s AND (document_type = 'error' OR content LIKE '%sudo%password%' OR content LIKE '%[sudo]%') ORDER BY created_at DESC LIMIT 3",
+                    (self.current_monitored_build,), fetch=True
+                )
+                
+                sudo_stuck = False
+                for error in sudo_errors:
+                    content = error.get('content', '').lower()
+                    if any(prompt in content for prompt in [
+                        'sudo password', 'password for', '[sudo] password', 'sudo prompt detected'
+                    ]):
+                        sudo_stuck = True
+                        break
+                
+                if sudo_stuck:
+                    self.logs_text.append(f"\n🚨 SUDO PASSWORD ISSUE DETECTED:")
+                    self.logs_text.append(f"  Build appears to be stuck waiting for sudo password input")
+                    self.logs_text.append(f"  This usually means sudo password was not provided at build start")
+                    self.logs_text.append(f"  Recommendation: Cancel build and restart with proper sudo password")
+                    self.logs_text.append(f"  Use 'Force Cancel' button to terminate stuck processes")
+                else:
+                    self.logs_text.append(f"\n✅ SUDO STATUS: No sudo password issues detected")
+                    
+            except Exception as e:
+                self.logs_text.append(f"\n⚠️ SUDO CHECK: Error checking sudo status - {str(e)}")
+            
             # 5. Build Phase Detection
             recent_logs = self.db.execute_query(
                 "SELECT title, content, created_at FROM build_documents WHERE build_id = %s AND document_type = 'log' ORDER BY created_at DESC LIMIT 10",
@@ -5881,9 +5948,26 @@ stages:
     
     def refresh_build_logs(self):
         """Manually refresh build logs with enhanced monitoring"""
-        if not hasattr(self, 'current_monitored_build') or not self.db:
-            self.logs_text.append("No active build to refresh")
-            return
+        if not hasattr(self, 'current_monitored_build') or not self.current_monitored_build or not self.db:
+            # Try to find a running build
+            if self.db:
+                try:
+                    running_builds = self.db.execute_query(
+                        "SELECT build_id FROM builds WHERE status = 'running' ORDER BY start_time DESC LIMIT 1",
+                        fetch=True
+                    )
+                    if running_builds:
+                        self.current_monitored_build = running_builds[0]['build_id']
+                        self.logs_text.append(f"Found running build: {self.current_monitored_build}")
+                    else:
+                        self.logs_text.append("No active build to refresh")
+                        return
+                except:
+                    self.logs_text.append("No active build to refresh")
+                    return
+            else:
+                self.logs_text.append("No active build to refresh")
+                return
         
         try:
             # Check build status first

@@ -61,9 +61,13 @@ class MLBuildWizard(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(self.cancel_btn)
         
-        self.create_btn = QPushButton("Create Optimized Build")
+        self.save_btn = QPushButton("Save Configuration")
+        self.save_btn.clicked.connect(self.save_optimized_build)
+        button_layout.addWidget(self.save_btn)
+        
+        self.create_btn = QPushButton("Start Build")
         self.create_btn.clicked.connect(self.create_optimized_build)
-        self.create_btn.setStyleSheet("font-weight: bold;")
+        self.create_btn.setStyleSheet("font-weight: bold; background-color: #4CAF50; color: white;")
         button_layout.addWidget(self.create_btn)
         
         layout.addLayout(button_layout)
@@ -227,7 +231,7 @@ class MLBuildWizard(QDialog):
         self.tabs.addTab(widget, "Advanced Settings")
     
     def load_ml_recommendations(self):
-        """Load ML recommendations"""
+        """Load ML recommendations including Stage 4 analysis"""
         if not self.optimizer:
             self.ml_status.setText("❌ ML optimizer not available")
             return
@@ -240,17 +244,40 @@ class MLBuildWizard(QDialog):
                 # Update UI with recommendations
                 self.parallel_jobs.setValue(job_rec.get("recommended_jobs", 2))
                 
-                # Display real system analysis
-                rec_text = f"Real System Analysis:\n"
+                # Get Stage 4 ML analysis
+                stage4_analysis = ""
+                if self.ml_engine:
+                    # System health check
+                    health_summary = self.ml_engine.get_system_health_summary()
+                    if 'error' not in health_summary:
+                        health_score = health_summary.get('anomalies', {}).get('system_health_score', 100)
+                        stage4_analysis += f"• System Health Score: {health_score:.1f}/100\n"
+                    
+                    # Maintenance recommendations (without saving to database)
+                    try:
+                        maintenance = self.ml_engine.maintenance_advisor.generate_maintenance_recommendations()
+                        if 'error' not in maintenance:
+                            critical_count = maintenance.get('priority_counts', {}).get('critical', 0)
+                            high_count = maintenance.get('priority_counts', {}).get('high', 0)
+                            if critical_count > 0 or high_count > 0:
+                                stage4_analysis += f"• Maintenance Alerts: {critical_count} critical, {high_count} high priority\n"
+                            else:
+                                stage4_analysis += "• Maintenance Status: All systems optimal\n"
+                    except Exception as e:
+                        stage4_analysis += f"• Maintenance Status: Analysis unavailable ({str(e)[:50]})\n"
+                
+                # Display comprehensive analysis
+                rec_text = f"Real System Analysis (Stage 4 ML):\n"
                 rec_text += f"• CPUs: {job_rec.get('system_cpus', 'Detecting...')}\n"
                 rec_text += f"• Memory: {job_rec.get('system_memory_gb', 'Detecting...')} GB\n"
                 rec_text += f"• Recommended Jobs: {job_rec.get('recommended_jobs', 'Calculating...')}\n"
+                rec_text += stage4_analysis
                 rec_text += f"• Analysis Method: {job_rec.get('analysis_method', 'Real-time system analysis')}\n"
                 rec_text += f"• Data Points: {job_rec.get('data_points', 0)} builds analyzed\n"
                 rec_text += f"• Reasoning: {job_rec.get('reasoning', 'Analyzing system capabilities...')}"
                 
                 self.recommendations_text.setText(rec_text)
-                self.ml_status.setText("✅ Real ML analysis completed")
+                self.ml_status.setText("✅ Stage 4 ML analysis completed")
             else:
                 self.ml_status.setText(f"⚠️ ML error: {job_rec['error']}")
                 
@@ -332,53 +359,70 @@ class MLBuildWizard(QDialog):
             rec_text = "; ".join(recommendations)
             self.stage_table.setItem(row, 2, QTableWidgetItem(rec_text))
     
-    def create_optimized_build(self):
-        """Create optimized build configuration"""
+    def save_optimized_build(self):
+        """Save optimized build configuration only"""
         try:
             config_name = self.config_name.text().strip()
             if not config_name:
                 config_name = f"ml_optimized_{QDateTime.currentDateTime().toString('yyyyMMdd_hhmmss')}"
             
-            # Gather configuration
-            config = {
-                "name": config_name,
-                "type": self.build_type.currentText(),
-                "optimization_level": self.optimization_level.currentText(),
-                "system": {
-                    "parallel_jobs": self.parallel_jobs.value(),
-                    "memory_limit": self.memory_limit.text(),
-                    "io_scheduler": self.io_scheduler.currentText()
-                },
-                "advanced": {
-                    "ccache": self.enable_ccache.isChecked(),
-                    "tmpfs": self.enable_tmpfs.isChecked(),
-                    "lto": self.enable_lto.isChecked()
-                },
-                "ml_generated": True,
-                "created_at": QDateTime.currentDateTime().toString(Qt.ISODate)
-            }
+            config = self.get_current_config()
+            config_path = self.save_configuration(config)
             
-            # Save configuration (this would integrate with the build system)
-            self.save_configuration(config)
-            
-            QMessageBox.information(self, "Success", f"Optimized build configuration '{config_name}' created!")
-            self.accept()
+            if config_path:
+                QMessageBox.information(self, "Configuration Saved", 
+                                       f"ML-optimized build configuration '{config_name}' saved successfully!\n\n"
+                                       f"Configuration file: {config_path}")
+            else:
+                QMessageBox.warning(self, "Save Failed", "Failed to save configuration.")
             
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to create configuration: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to save configuration: {e}")
+    
+    def create_optimized_build(self):
+        """Create and start optimized build"""
+        try:
+            config_name = self.config_name.text().strip()
+            if not config_name:
+                config_name = f"ml_optimized_{QDateTime.currentDateTime().toString('yyyyMMdd_hhmmss')}"
+            
+            config = self.get_current_config()
+            config_path = self.save_configuration(config)
+            
+            if not config_path:
+                QMessageBox.warning(self, "Save Failed", "Failed to save configuration.")
+                return
+            
+            # Start the build using the parent's method that includes sudo prompt
+            parent = self.parent()
+            if parent and hasattr(parent, 'start_wizard_build'):
+                try:
+                    actual_build_id = parent.start_wizard_build(config_name, "ML-Optimized LFS", "12.4", self.parallel_jobs.value())
+                    
+                    if actual_build_id:
+                        QMessageBox.information(self, "Build Started", 
+                                               f"ML-optimized build '{config_name}' started successfully!\n\n"
+                                               f"Build ID: {actual_build_id}\n"
+                                               f"Monitor progress in the Build Monitor tab.")
+                        self.accept()
+                    else:
+                        QMessageBox.warning(self, "Build Failed", "Failed to start the build.")
+                    return
+                except Exception as e:
+                    QMessageBox.critical(self, "Build Error", f"Failed to start build: {str(e)}")
+                    return
+            else:
+                QMessageBox.warning(self, "Parent Window Not Available", 
+                                   f"Configuration saved but cannot start build automatically.\n\n"
+                                   f"Use the Build Monitor tab to start the build manually.")
+                self.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to create and start build: {e}")
     
     def save_configuration(self, config: Dict):
-        """Start actual ML-optimized build"""
+        """Save ML-optimized build configuration"""
         try:
-            # Get build engine from parent
-            build_engine = None
-            if self.parent() and hasattr(self.parent(), 'build_engine'):
-                build_engine = self.parent().build_engine
-            
-            if not build_engine:
-                logging.error("Build engine not available")
-                return None
-            
             # Generate LFS build configuration with ML optimizations
             build_id = f"ml_build_{QDateTime.currentDateTime().toString('yyyyMMdd_hhmmss')}"
             parallel_jobs = config['system']['parallel_jobs']
@@ -432,78 +476,19 @@ stages:
             if repo_manager:
                 config_path = repo_manager.add_build_config(build_id, config_content)
             else:
-                # Fallback: save to temp file
-                import tempfile
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                # Fallback: save to configs directory
+                import os
+                configs_dir = os.path.expanduser("~/lfs_configs")
+                os.makedirs(configs_dir, exist_ok=True)
+                config_path = os.path.join(configs_dir, f"{build_id}.yaml")
+                with open(config_path, 'w') as f:
                     f.write(config_content)
-                    config_path = f.name
             
-            # Always ask for sudo password for LFS builds
-            password, ok = QInputDialog.getText(
-                self, 
-                'Sudo Password Required', 
-                f'LFS builds require sudo access for directory setup and permissions.\n\nEnter your sudo password:',
-                QLineEdit.Password
-            )
-            
-            if ok and password:
-                build_engine.set_sudo_password(password)
-                logging.info(f"🔐 Sudo password provided for ML-optimized LFS build")
-            else:
-                reply = QMessageBox.question(
-                    self, 'Continue Without Sudo?', 
-                    'No sudo password provided. Build will likely fail due to permission issues.\n\nContinue anyway?',
-                    QMessageBox.Yes | QMessageBox.No, 
-                    QMessageBox.No
-                )
-                if reply != QMessageBox.Yes:
-                    return None
-                logging.warning(f"⚠️ Continuing ML build without sudo password - build may fail")
-            
-            # Start the build
-            actual_build_id = build_engine.start_build(config_path, config['name'])
-            
-            # Activate monitoring in parent window
-            if self.parent():
-                parent = self.parent()
-                parent.current_build_id = actual_build_id
-                parent.build_id_label.setText(f"Build ID: {actual_build_id}")
-                parent.build_status_label.setText("Status: Running (ML-Optimized)")
-                parent.progress_bar.setValue(0)
-                parent.cancel_build_btn.setEnabled(True)
-                parent.force_cancel_btn.setEnabled(True)
-                
-                # Initialize detailed logs like regular wizard
-                if hasattr(parent, 'logs_text'):
-                    sudo_status = "✅ Provided" if build_engine.sudo_password else "❌ NOT PROVIDED"
-                    parent.logs_text.setPlainText(f"🚀 ML-Optimized LFS Build {actual_build_id} started\n"
-                                                 f"Configuration: {config['name']}\n"
-                                                 f"Type: {config['type']}\n"
-                                                 f"Optimization Level: {config['optimization_level']}\n"
-                                                 f"Parallel Jobs: {config['system']['parallel_jobs']}\n"
-                                                 f"Memory Limit: {config['system']['memory_limit']}\n"
-                                                 f"Configuration File: {config_path}\n"
-                                                 f"Sudo Password: {sudo_status}\n"
-                                                 f"\n🤖 This is an ML-optimized build with intelligent resource allocation!\n"
-                                                 f"\n📋 Live logs will appear below as build progresses...\n")
-                
-                # Start live monitoring
-                if hasattr(parent, 'start_live_log_monitoring'):
-                    parent.start_live_log_monitoring(actual_build_id)
-                
-                # Initial log refresh
-                from PyQt5.QtCore import QTimer
-                QTimer.singleShot(1000, parent.refresh_build_logs)
-                
-                # Refresh builds table
-                if hasattr(parent, 'refresh_builds'):
-                    parent.refresh_builds()
-            
-            logging.info(f"ML-optimized build started: {actual_build_id}")
-            return actual_build_id
+            logging.info(f"ML-optimized build configuration saved: {config_path}")
+            return config_path
             
         except Exception as e:
-            logging.error(f"Failed to start ML build: {e}")
+            logging.error(f"Failed to save ML build configuration: {e}")
             return None
     
     def export_json(self):

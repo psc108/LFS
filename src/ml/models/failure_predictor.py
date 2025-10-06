@@ -34,15 +34,19 @@ class FailurePredictor:
     def _load_existing_patterns(self):
         """Load existing failure patterns from database analysis"""
         try:
-            # Analyze historical failure patterns
+            # Analyze historical failure patterns from real database data only
             self._analyze_stage_failure_rates()
             self._analyze_error_patterns()
             self._analyze_timing_patterns()
             
-            if self.failure_patterns:
+            # Only mark as trained if we have real patterns from database
+            if self.stage_failure_rates or self.failure_patterns:
                 self.is_trained_flag = True
                 self.last_training_time = datetime.now()
-                self.logger.info("Loaded existing failure patterns from database")
+                self.accuracy = None  # No accuracy without supervised training
+                self.logger.info(f"Loaded {len(self.stage_failure_rates)} stage patterns and {len(self.failure_patterns)} failure patterns from database")
+            else:
+                self.logger.info("No existing failure patterns found in database")
             
         except Exception as e:
             self.logger.error(f"Failed to load existing patterns: {e}")
@@ -462,32 +466,40 @@ class FailurePredictor:
             
             self.logger.info("Training failure predictor...")
             
-            # Get training data
+            # Get training data from real database
             pipeline = TrainingDataPipeline(self.db)
             features, labels = pipeline.prepare_failure_prediction_data()
             
             if not pipeline.validate_training_data(features, labels):
-                # Fallback to pattern analysis
+                # Only analyze patterns from real data, don't generate fake training results
                 self._analyze_stage_failure_rates()
                 self._analyze_error_patterns()
                 self._analyze_timing_patterns()
                 
-                total_patterns = len(self.stage_failure_rates) + len(self.failure_patterns)
-                accuracy = min(0.85, 0.5 + (total_patterns * 0.05))
+                # Check if we have any real patterns from database
+                if not self.stage_failure_rates and not self.failure_patterns:
+                    return {
+                        "success": False,
+                        "error": "Insufficient real build data for training. Need at least 5 builds with complete data.",
+                        "samples_available": len(features),
+                        "training_method": "none"
+                    }
                 
+                # Mark as trained only if we have real patterns
                 self.is_trained_flag = True
                 self.last_training_time = datetime.now()
-                self.accuracy = accuracy
+                self.accuracy = None  # No accuracy without real training data
                 
                 return {
                     "success": True,
-                    "accuracy": accuracy,
+                    "accuracy": None,
                     "training_time": "< 1 minute",
-                    "samples_used": total_patterns,
-                    "training_method": "pattern_analysis"
+                    "samples_used": len(self.stage_failure_rates),
+                    "training_method": "pattern_analysis_only",
+                    "note": "Using pattern analysis from real database data only"
                 }
             
-            # Train with real data
+            # Train with real data only
             self.accuracy = self._train_with_data(features, labels)
             self.is_trained_flag = True
             self.last_training_time = datetime.now()

@@ -303,7 +303,7 @@ class BuildEngine:
         try:
             # Modify command to use sudo with password if needed
             command = stage.command
-            env = None  # Initialize env variable
+            env = os.environ.copy()  # Always copy environment
             
             if self.sudo_password:
                 # Set SUDO_ASKPASS environment variable and use -A flag
@@ -316,15 +316,16 @@ class BuildEngine:
                 os.chmod(askpass_script.name, 0o755)
                 
                 # Set environment variables for sudo
-                env = os.environ.copy()
                 env['SUDO_ASKPASS'] = askpass_script.name
-                
-                # Replace sudo commands to use askpass
-                import re
-                command = re.sub(r'sudo\s+', 'sudo -A ', command)
                 
                 # Store askpass script path for cleanup
                 self._current_askpass_script = askpass_script.name
+                
+                print(f"🔐 Using sudo with askpass script: {askpass_script.name} for stage {stage.name}")
+            else:
+                # If no sudo password provided, ensure non-interactive mode
+                env['SUDO_NONINTERACTIVE'] = '1'
+                print(f"⚠️ No sudo password provided - build will fail on sudo commands")
             
             # Add timeout and better error handling for stuck processes
             print(f"🚀 Starting stage {stage.name} with command: {command[:100]}...")
@@ -351,6 +352,7 @@ class BuildEngine:
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,  # Prevent stdin input
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
@@ -469,6 +471,30 @@ class BuildEngine:
                     stderr_lines.append(stderr_line)
                     line_stripped = stderr_line.strip()
                     if line_stripped:
+                        # Check for sudo password prompts
+                        if any(prompt in line_stripped.lower() for prompt in [
+                            'password for', '[sudo] password', 'sudo password', 'enter password'
+                        ]):
+                            print(f"🚨 SUDO PROMPT DETECTED in {stage.name}: {line_stripped}")
+                            self.db.add_document(
+                                build_id, 'error', f'Sudo Prompt Detected: {stage.name}',
+                                f"Sudo password prompt detected in CLI: {line_stripped}\n\n"
+                                f"This indicates the sudo password was not properly provided or configured.\n"
+                                f"The build will likely hang waiting for password input.\n\n"
+                                f"Solution: Cancel this build and restart with proper sudo password.",
+                                {'stage_order': stage.order, 'sudo_prompt': True, 'critical': True}
+                            )
+                            # This is a critical error - the build will hang
+                            stage.status = 'failed'
+                            stage.error = f'Sudo password prompt detected: {line_stripped}'
+                            try:
+                                process.terminate()
+                                process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                            self.current_process = None
+                            return
+                        
                         # Show all stderr output for debugging
                         print(f"🚨 {stage.name} stderr: {line_stripped}")
                         
@@ -694,15 +720,24 @@ class BuildEngine:
         """Force cleanup of a stuck build"""
         print(f"🧽 Force cleaning up build {build_id}")
         
+        # Check if build might be stuck on sudo prompt
+        sudo_stuck = self._check_for_sudo_stuck_build(build_id)
+        if sudo_stuck:
+            print(f"🚨 Build appears to be stuck on sudo password prompt")
+        
         # Kill any processes that might be related
         import psutil
+        killed_processes = []
         try:
             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 try:
                     cmdline = ' '.join(proc.info['cmdline'] or [])
-                    if 'bash scripts/' in cmdline or build_id in cmdline:
+                    if any(pattern in cmdline for pattern in [
+                        'bash scripts/', build_id, '/mnt/lfs', 'sudo', 'make -j', 'gcc'
+                    ]):
                         print(f"🔥 Killing related process: {proc.info['pid']} - {proc.info['name']}")
                         proc.kill()
+                        killed_processes.append(f"PID {proc.info['pid']}: {proc.info['name']}")
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception as e:
@@ -713,19 +748,64 @@ class BuildEngine:
             self.build_cancelled = True
             self.current_process = None
             self.db.update_build_status(build_id, 'cancelled', self.current_build.get('completed_stages', 0))
+            
+            cleanup_reason = 'sudo_stuck' if sudo_stuck else 'force_cleanup'
+            cleanup_msg = f'Build was force cleaned due to stuck state at {datetime.now()}\n\n'
+            
+            if sudo_stuck:
+                cleanup_msg += 'Build appeared to be stuck waiting for sudo password input.\n'
+                cleanup_msg += 'This usually happens when sudo password was not provided at build start.\n\n'
+            
+            cleanup_msg += f'Killed {len(killed_processes)} related processes:\n'
+            for proc in killed_processes:
+                cleanup_msg += f'  - {proc}\n'
+            
             self.db.add_document(
                 build_id, 'log', 'Build Force Cleaned',
-                f'Build was force cleaned due to stuck state at {datetime.now()}', 
-                {'force_cleanup': True}
+                cleanup_msg,
+                {'force_cleanup': True, 'sudo_stuck': sudo_stuck, 'killed_processes': len(killed_processes)}
             )
             
             # Perform cleanup after force cancel
-            self._perform_build_cleanup(build_id, 'cancelled', 'force_cleanup')
+            self._perform_build_cleanup(build_id, 'cancelled', cleanup_reason)
             
             # Emit completion event
             self.emit_event('build_complete', {'build_id': build_id, 'status': 'cancelled'})
         
         print(f"✅ Build {build_id} force cleanup completed")
+    
+    def _check_for_sudo_stuck_build(self, build_id: str) -> bool:
+        """Check if a build is stuck waiting for sudo password"""
+        try:
+            # Check recent logs for sudo prompts
+            recent_logs = self.db.execute_query(
+                "SELECT content FROM build_documents WHERE build_id = %s AND document_type = 'error' AND created_at > NOW() - INTERVAL 10 MINUTE ORDER BY created_at DESC LIMIT 5",
+                (build_id,), fetch=True
+            )
+            
+            for log in recent_logs:
+                content = log.get('content', '').lower()
+                if any(prompt in content for prompt in [
+                    'sudo password', 'password for', '[sudo] password', 'sudo prompt detected'
+                ]):
+                    return True
+            
+            # Check for processes that might be waiting for input
+            import psutil
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'status']):
+                try:
+                    cmdline = ' '.join(proc.info['cmdline'] or [])
+                    if build_id in cmdline or 'bash scripts/' in cmdline:
+                        # Check if process is in sleeping/waiting state
+                        if proc.info.get('status') in ['sleeping', 'waiting']:
+                            return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            
+            return False
+        except Exception as e:
+            print(f"Error checking for sudo stuck build: {e}")
+            return False
     
     def get_build_status(self, build_id: str) -> Dict:
         return self.db.get_build_details(build_id)
@@ -761,25 +841,16 @@ class BuildEngine:
                 print(f"⚠️ Need sudo for LFS directory creation")
             
             if not basic_setup_success and not self.sudo_password:
-                # Prompt for sudo password if needed
-                print(f"🔐 Sudo password required for LFS permissions setup")
-                self.emit_event('sudo_required', {'build_id': build_id, 'reason': 'LFS directory setup'})
-                
-                # Wait a bit for password to be set
-                import time
-                for i in range(30):  # Wait up to 30 seconds
-                    if self.sudo_password:
-                        break
-                    time.sleep(1)
-                
-                if not self.sudo_password:
-                    self.db.add_document(
-                        build_id, 'log', 'LFS Permissions Setup Skipped',
-                        'No sudo password provided - attempting build without full permissions setup\n'
-                        'Build may fail if LFS directories are not accessible',
-                        {'setup': True, 'skipped': True, 'warning': True}
-                    )
-                    return
+                # No sudo password available - skip advanced setup
+                print(f"⚠️ No sudo password available for LFS permissions setup")
+                self.db.add_document(
+                    build_id, 'log', 'LFS Permissions Setup Skipped',
+                    'No sudo password provided during build start - attempting build without full permissions setup\n'
+                    'Build may fail if LFS directories are not accessible\n'
+                    'To fix this, provide sudo password when starting the build',
+                    {'setup': True, 'skipped': True, 'warning': True}
+                )
+                return
             
             if self.sudo_password:
                 # Create askpass script

@@ -161,12 +161,14 @@ class MLStatusTab(QWidget):
             models_count = health.get('components', {}).get('models_loaded', 0)
             self.models_label.setText(f"Models: {models_count}")
             
-            # Get accuracy
+            # Get accuracy from real models
             accuracy = self.ml_engine.get_prediction_accuracy()
-            avg_accuracy = (accuracy.get('failure_prediction_accuracy', 0) + 
-                          accuracy.get('performance_prediction_accuracy', 0) + 
-                          accuracy.get('anomaly_detection_accuracy', 0)) / 3
-            self.accuracy_label.setText(f"Accuracy: {avg_accuracy:.1%}")
+            real_accuracies = [v for k, v in accuracy.items() if k.endswith('_accuracy') and v is not None]
+            if real_accuracies:
+                avg_accuracy = sum(real_accuracies) / len(real_accuracies)
+                self.accuracy_label.setText(f"Accuracy: {avg_accuracy:.1%}")
+            else:
+                self.accuracy_label.setText("Accuracy: No training data")
             
             # Memory usage
             import psutil
@@ -310,7 +312,10 @@ class MLStatusTab(QWidget):
                 output += "✅ Successfully Trained Models:\n"
                 for model in trained:
                     output += f"   • {model.get('model', 'Unknown')}\n"
-                    output += f"     Accuracy: {model.get('accuracy', 0):.2%}\n"
+                    if model.get('accuracy') is not None:
+                        output += f"     Accuracy: {model.get('accuracy'):.2%}\n"
+                    else:
+                        output += f"     Accuracy: No training data\n"
                     output += f"     Samples: {model.get('samples_used', 0)}\n"
                     output += f"     Time: {model.get('training_time', 'N/A')}\n\n"
             
@@ -329,8 +334,11 @@ class MLStatusTab(QWidget):
                 output += f"   {model_name}:\n"
                 output += f"     Loaded: {'✅' if model_info.get('loaded') else '❌'}\n"
                 output += f"     Trained: {'✅' if model_info.get('trained') else '❌'}\n"
-                if 'accuracy' in model_info and model_info['accuracy']:
-                    output += f"     Accuracy: {model_info['accuracy']:.2%}\n"
+                if 'accuracy' in model_info:
+                    if model_info['accuracy'] is not None:
+                        output += f"     Accuracy: {model_info['accuracy']:.2%}\n"
+                    else:
+                        output += f"     Accuracy: No training data\n"
                 output += "\n"
                 
             self.models_text.setText(output)
@@ -374,10 +382,19 @@ class MLStatusTab(QWidget):
             output += f"Enabled Models: {', '.join(health.get('enabled_models', []))}\n\n"
             
             output += "Prediction Accuracy:\n"
-            output += f"  Failure Prediction: {accuracy.get('failure_prediction_accuracy', 0):.1%}\n"
-            output += f"  Performance Prediction: {accuracy.get('performance_prediction_accuracy', 0):.1%}\n"
-            output += f"  Anomaly Detection: {accuracy.get('anomaly_detection_accuracy', 0):.1%}\n"
-            output += f"  Total Predictions: {accuracy.get('total_predictions', 0)}\n"
+            for key, value in accuracy.items():
+                if key.endswith('_accuracy'):
+                    model_name = key.replace('_accuracy', '').replace('_', ' ').title()
+                    if value is not None:
+                        output += f"  {model_name}: {value:.1%}\n"
+                    else:
+                        output += f"  {model_name}: No training data\n"
+                elif key.endswith('_predictions'):
+                    model_name = key.replace('_predictions', '').replace('_', ' ').title()
+                    output += f"  {model_name} Predictions Made: {value}\n"
+            
+            if accuracy.get('data_source'):
+                output += f"  Data Source: {accuracy.get('data_source')}\n"
             
             self.system_status_text.setText(output)
             

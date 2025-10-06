@@ -75,6 +75,16 @@ class MLEngine:
         # Phase 3: Build Optimization
         from .optimization.build_optimizer import BuildOptimizer
         self.build_optimizer = BuildOptimizer(db_manager)
+        
+        # Stage 4: Advanced Analysis Components
+        from .analysis import LogAnalyzer, AnomalyDetector as SystemAnomalyDetector, MaintenanceAdvisor
+        from .research.solution_finder import SolutionFinder
+        from .monitoring.live_build_monitor import LiveBuildMonitor
+        self.log_analyzer = LogAnalyzer(db_manager)
+        self.system_anomaly_detector = SystemAnomalyDetector(db_manager)
+        self.maintenance_advisor = MaintenanceAdvisor(db_manager, self.log_analyzer, self.system_anomaly_detector)
+        self.solution_finder = SolutionFinder(db_manager)
+        self.live_monitor = LiveBuildMonitor(db_manager, self)
     
     def _load_config(self, config_path: Optional[str]) -> Dict:
         """Load ML configuration"""
@@ -266,8 +276,8 @@ class MLEngine:
             return {"error": str(e), "ml_enabled": self.is_enabled()}
     
     def train_models(self, force_retrain: bool = False) -> Dict:
-        """Train or retrain ML models"""
-        results = {"trained_models": [], "errors": []}
+        """Train or retrain ML models using real database data only"""
+        results = {"trained_models": [], "errors": [], "data_source": "real_database_only"}
         
         if not self.is_enabled():
             results["errors"].append("ML engine not enabled")
@@ -280,16 +290,23 @@ class MLEngine:
         for model_name, model in self.models.items():
             try:
                 if hasattr(model, 'needs_training') and (model.needs_training() or force_retrain):
-                    self.logger.info(f"Training model: {model_name}")
+                    self.logger.info(f"Training model: {model_name} with real database data only")
                     training_result = model.train()
                     
                     if training_result.get("success"):
-                        results["trained_models"].append({
+                        model_result = {
                             "model": model_name,
                             "accuracy": training_result.get("accuracy"),
                             "training_time": training_result.get("training_time"),
-                            "samples_used": training_result.get("samples_used")
-                        })
+                            "samples_used": training_result.get("samples_used"),
+                            "training_method": training_result.get("training_method", "unknown"),
+                            "data_source": "real_database_only"
+                        }
+                        
+                        if training_result.get("note"):
+                            model_result["note"] = training_result["note"]
+                        
+                        results["trained_models"].append(model_result)
                     else:
                         results["errors"].append(f"{model_name}: {training_result.get('error')}")
                         
@@ -340,23 +357,31 @@ class MLEngine:
                 },
                 'database_connection': 'Connected' if self.db else 'Disconnected',
                 'enabled_models': list(self.models.keys()),
-                'background_retry': 'Active' if hasattr(self, 'retry_active') and self.retry_active else 'Inactive'
+                'background_retry': 'Active' if hasattr(self, 'retry_active') and self.retry_active else 'Inactive',
+                'data_source': 'real_database_only',
+                'no_demo_data': True
             }
             return status
         except Exception as e:
             return {'overall_health': 'Error', 'error': str(e)}
     
     def get_prediction_accuracy(self):
-        """Get prediction accuracy metrics"""
+        """Get prediction accuracy metrics from real model training"""
         try:
             accuracy_data = {
-                'failure_prediction_accuracy': 0.85,
-                'performance_prediction_accuracy': 0.78,
-                'anomaly_detection_accuracy': 0.92,
-                'total_predictions': 150,
-                'correct_predictions': 127,
-                'models_evaluated': len(self.models)
+                'models_evaluated': len(self.models),
+                'data_source': 'real_database_only'
             }
+            
+            # Get actual accuracy from trained models
+            for model_name, model in self.models.items():
+                if hasattr(model, 'accuracy') and model.accuracy is not None:
+                    accuracy_data[f'{model_name}_accuracy'] = model.accuracy
+                    accuracy_data[f'{model_name}_predictions'] = getattr(model, 'prediction_count', 0)
+                else:
+                    accuracy_data[f'{model_name}_accuracy'] = None
+                    accuracy_data[f'{model_name}_note'] = 'No supervised training data available'
+            
             return accuracy_data
         except Exception as e:
             return {'error': str(e)}
@@ -554,17 +579,48 @@ class MLEngine:
                 'background_retry_active': hasattr(self, 'retry_active') and self.retry_active
             }
             
+            # Add Stage 4 status with solution database analytics
+            status['stage4'] = {
+                'log_analyzer': hasattr(self, 'log_analyzer'),
+                'system_anomaly_detector': hasattr(self, 'system_anomaly_detector'),
+                'maintenance_advisor': hasattr(self, 'maintenance_advisor'),
+                'solution_finder': hasattr(self, 'solution_finder'),
+                'live_monitor': hasattr(self, 'live_monitor'),
+                'solution_database': self.get_solution_analytics() if hasattr(self, 'solution_finder') else {'status': 'not_initialized'},
+                'live_monitoring': self.get_live_monitoring_status() if hasattr(self, 'live_monitor') else {'status': 'not_initialized'},
+                'capabilities': [
+                    'Log Analysis for Root Cause Detection',
+                    'System Health Anomaly Detection',
+                    'Predictive Maintenance Recommendations',
+                    'Internet-based Solution Research with Caching',
+                    'Solution Effectiveness Tracking',
+                    'Automated Solution Database Updates',
+                    'Real-time Build Log Monitoring',
+                    'On-the-fly Error Detection and Correction'
+                ]
+            }
+            
             return status
             
         except Exception as e:
             return {'error': str(e), 'ml_enabled': False}
     
-    def start_build_monitoring(self, build_id: str):
-        """Start ML monitoring for active build"""
+    def start_build_monitoring(self, build_id: str, stage_name: str = None):
+        """Start comprehensive ML monitoring for active build"""
         try:
             # Attempt to initialize data pipeline if not ready
             if not self.data_pipeline:
                 self._init_data_pipeline()
+            
+            # Start live log monitoring with error detection
+            if hasattr(self, 'live_monitor'):
+                self.live_monitor.start_monitoring(build_id, stage_name)
+                self.logger.info(f"Started live build monitoring for {build_id}")
+            
+            # Detect system anomalies for this build
+            anomalies = self.detect_system_anomalies(build_id)
+            if anomalies.get('anomaly_count', 0) > 0:
+                self.logger.warning(f"System anomalies detected for build {build_id}: {anomalies['anomaly_count']} issues")
             
             if hasattr(self, 'real_time_inference'):
                 # Monitor build in real-time
@@ -572,6 +628,25 @@ class MLEngine:
                 self.logger.info(f"Started ML monitoring for build {build_id}: {prediction.get('overall_risk', 'unknown')}")
         except Exception as e:
             self.logger.error(f"Failed to start build monitoring: {e}")
+    
+    def stop_build_monitoring(self, build_id: str):
+        """Stop ML monitoring for build"""
+        try:
+            if hasattr(self, 'live_monitor'):
+                self.live_monitor.stop_monitoring(build_id)
+                self.logger.info(f"Stopped live monitoring for build {build_id}")
+        except Exception as e:
+            self.logger.error(f"Failed to stop build monitoring: {e}")
+    
+    def get_live_monitoring_status(self) -> Dict:
+        """Get live monitoring status"""
+        try:
+            if hasattr(self, 'live_monitor'):
+                return self.live_monitor.get_monitoring_status()
+            else:
+                return {'error': 'Live monitor not available'}
+        except Exception as e:
+            return {'error': str(e)}
     
     def analyze_system_performance(self) -> Dict:
         """Analyze overall system performance using ML"""
@@ -651,8 +726,9 @@ class MLEngine:
     def get_build_optimization(self, config_name: str = None) -> Dict:
         """Phase 3: Get ML-driven build optimization recommendations"""
         try:
-            if hasattr(self, 'build_optimizer'):
-                return self.build_optimizer.optimize_build_configuration(config_name)
+            if hasattr(self, 'build_optimizer') and self.build_optimizer:
+                result = self.build_optimizer.optimize_build_configuration(config_name)
+                return result if result else {'error': 'No optimization result returned'}
             else:
                 return {'error': 'Build optimizer not available'}
         except Exception as e:
@@ -662,8 +738,9 @@ class MLEngine:
     def get_parallel_job_recommendation(self) -> Dict:
         """Phase 3: Get optimal parallel job count recommendation"""
         try:
-            if hasattr(self, 'build_optimizer'):
-                return self.build_optimizer.recommend_parallel_jobs()
+            if hasattr(self, 'build_optimizer') and self.build_optimizer:
+                result = self.build_optimizer.recommend_parallel_jobs()
+                return result if result else {'error': 'No recommendation result returned'}
             else:
                 return {'error': 'Build optimizer not available'}
         except Exception as e:
@@ -673,12 +750,178 @@ class MLEngine:
     def analyze_build_performance_history(self, days_back: int = 30) -> Dict:
         """Phase 3: Analyze historical build performance for optimization"""
         try:
-            if hasattr(self, 'build_optimizer'):
-                return self.build_optimizer.analyze_historical_performance(days_back)
+            if hasattr(self, 'build_optimizer') and self.build_optimizer:
+                result = self.build_optimizer.analyze_historical_performance(days_back)
+                return result if result else {'error': 'No analysis result returned'}
             else:
                 return {'error': 'Build optimizer not available'}
         except Exception as e:
             self.logger.error(f"Performance history analysis failed: {e}")
+            return {'error': str(e)}
+    
+    def analyze_build_logs(self, build_id: str) -> Dict:
+        """Stage 4: Analyze build logs for root cause detection"""
+        try:
+            if hasattr(self, 'log_analyzer'):
+                # Ensure we have a valid build ID from the database
+                build_exists = self.db.execute_query(
+                    "SELECT build_id FROM builds WHERE build_id = %s",
+                    (build_id,), fetch=True
+                )
+                
+                if not build_exists:
+                    return {'error': f'Build {build_id} not found in database'}
+                
+                analysis_result = self.log_analyzer.analyze_build_logs(build_id)
+                
+                # Store analysis results in database
+                if 'error' not in analysis_result:
+                    self.db.add_document(
+                        build_id,
+                        'analysis',
+                        f'Log Analysis Results for {build_id}',
+                        json.dumps(analysis_result, indent=2),
+                        {'analysis_type': 'log_analysis', 'stage4_ml': True}
+                    )
+                
+                return analysis_result
+            else:
+                return {'error': 'Log analyzer not available'}
+        except Exception as e:
+            self.logger.error(f"Log analysis failed: {e}")
+            return {'error': str(e)}
+    
+    def detect_system_anomalies(self, build_id: str = None) -> Dict:
+        """Stage 4: Detect system health anomalies"""
+        try:
+            if hasattr(self, 'system_anomaly_detector'):
+                anomaly_result = self.system_anomaly_detector.detect_anomalies()
+                
+                # Store anomaly detection results only if we have a valid build_id
+                if 'error' not in anomaly_result and anomaly_result.get('anomaly_count', 0) > 0 and build_id:
+                    # Verify build exists before saving document
+                    build_exists = self.db.execute_query(
+                        "SELECT build_id FROM builds WHERE build_id = %s",
+                        (build_id,), fetch=True
+                    )
+                    
+                    if build_exists:
+                        self.db.add_document(
+                            build_id,
+                            'anomaly_report',
+                            f'System Anomaly Detection - {anomaly_result["timestamp"]}',
+                            json.dumps(anomaly_result, indent=2),
+                            {'analysis_type': 'anomaly_detection', 'stage4_ml': True, 'severity': 'high' if anomaly_result.get('anomaly_count', 0) > 5 else 'medium'}
+                        )
+                    else:
+                        # Log anomaly without saving to build_documents
+                        self.logger.warning(f"System anomalies detected before build {build_id}: {anomaly_result.get('anomaly_count', 0)} issues")
+                
+                return anomaly_result
+            else:
+                return {'error': 'System anomaly detector not available'}
+        except Exception as e:
+            self.logger.error(f"System anomaly detection failed: {e}")
+            return {'error': str(e)}
+    
+    def get_system_health_summary(self) -> Dict:
+        """Stage 4: Get comprehensive system health summary"""
+        try:
+            if hasattr(self, 'system_anomaly_detector'):
+                return self.system_anomaly_detector.get_health_summary()
+            else:
+                return {'error': 'System anomaly detector not available'}
+        except Exception as e:
+            self.logger.error(f"System health summary failed: {e}")
+            return {'error': str(e)}
+    
+    def generate_maintenance_recommendations(self) -> Dict:
+        """Stage 4: Generate predictive maintenance recommendations"""
+        try:
+            if hasattr(self, 'maintenance_advisor'):
+                recommendations = self.maintenance_advisor.generate_maintenance_recommendations()
+                
+                # Store maintenance recommendations
+                if 'error' not in recommendations and recommendations.get('total_recommendations', 0) > 0:
+                    self.db.add_document(
+                        'system_maintenance',
+                        'maintenance_report',
+                        f'Maintenance Recommendations - {recommendations["timestamp"]}',
+                        json.dumps(recommendations, indent=2),
+                        {'analysis_type': 'maintenance_recommendations', 'stage4_ml': True, 'priority_counts': recommendations.get('priority_counts', {})}
+                    )
+                
+                return recommendations
+            else:
+                return {'error': 'Maintenance advisor not available'}
+        except Exception as e:
+            self.logger.error(f"Maintenance recommendations failed: {e}")
+            return {'error': str(e)}
+    
+    def get_maintenance_checklist(self, priority: str = 'all') -> Dict:
+        """Stage 4: Get maintenance checklist by priority"""
+        try:
+            if hasattr(self, 'maintenance_advisor'):
+                return self.maintenance_advisor.get_maintenance_checklist(priority)
+            else:
+                return {'error': 'Maintenance advisor not available'}
+        except Exception as e:
+            self.logger.error(f"Maintenance checklist failed: {e}")
+            return {'error': str(e)}
+    
+    def find_build_solutions(self, build_id: str) -> Dict:
+        """Find internet-based solutions for build failures with comprehensive tracking"""
+        try:
+            if hasattr(self, 'solution_finder'):
+                report = self.solution_finder.generate_solution_report(int(build_id))
+                
+                # Log solution research activity
+                self.logger.info(f"Generated solution report for build {build_id}: "
+                               f"{report.get('solutions_found', 0)} solutions found, "
+                               f"{report.get('cached_solutions', 0)} from cache, "
+                               f"{report.get('new_solutions', 0)} new searches")
+                
+                return report
+            else:
+                return {'error': 'Solution finder not available'}
+        except Exception as e:
+            self.logger.error(f"Solution finding failed: {e}")
+            return {'error': str(e)}
+    
+    def search_error_solutions(self, error_message: str, build_stage: str, package_name: str = None) -> List[Dict]:
+        """Search for solutions to specific build errors with caching"""
+        try:
+            if hasattr(self, 'solution_finder'):
+                solutions = self.solution_finder.find_solutions(error_message, build_stage, package_name)
+                
+                # Log solution search activity
+                self.logger.info(f"Found {len(solutions)} solutions for error in stage {build_stage}")
+                
+                return solutions
+            else:
+                return []
+        except Exception as e:
+            self.logger.error(f"Error solution search failed: {e}")
+            return []
+    
+    def mark_solution_effective(self, error_message: str, effectiveness_rating: float):
+        """Mark a solution as effective for machine learning improvement"""
+        try:
+            if hasattr(self, 'solution_finder'):
+                self.solution_finder.mark_solution_effective(error_message, effectiveness_rating)
+                self.logger.info(f"Marked solution effectiveness: {effectiveness_rating}")
+        except Exception as e:
+            self.logger.error(f"Failed to mark solution effectiveness: {e}")
+    
+    def get_solution_analytics(self) -> Dict:
+        """Get analytics on solution database for ML insights"""
+        try:
+            if hasattr(self, 'solution_finder'):
+                return self.solution_finder.get_solution_analytics()
+            else:
+                return {'error': 'Solution finder not available'}
+        except Exception as e:
+            self.logger.error(f"Failed to get solution analytics: {e}")
             return {'error': str(e)}
     
     def shutdown(self):

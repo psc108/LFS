@@ -4,7 +4,7 @@ A native GUI build system for Linux From Scratch with MySQL backend, integrated 
 
 ## Features
 
-- **Native GUI**: PyQt5-based interface for RHEL 9/Amazon Linux 2023 with dropdown menu controls
+- **Native GUI**: PyQt5-based interface for RHEL 9/Amazon Linux 2023 with resizable window, minimize/maximize controls, and dropdown menu navigation
 - **MySQL Backend**: All build attempts logged to searchable database with document preservation
 - **Complete LFS 12.4**: Full Linux From Scratch build automation with 10 stages
 - **Modular Architecture**: Separate, updateable build stages with rollback capability
@@ -30,7 +30,7 @@ A native GUI build system for Linux From Scratch with MySQL backend, integrated 
 - **NextBuild Tab**: Dedicated interface for browsing, managing, and exporting stored build analysis reports
 - **Automated Permission Management**: Intelligent LFS directory setup with automatic permission configuration
 - **Automated Git Branch Management**: Dedicated Git branches created automatically for each build with transparent version control
-- **Build Templates & Wizard**: Pre-configured templates with guided setup wizard for different LFS variants
+- **Dual Build Wizards**: ML-optimized build wizard with AI recommendations and standard build wizard for traditional configuration
 - **Parallel Build Engine**: Multi-core build orchestration with intelligent dependency management
 - **REST API Interface**: Complete API for external integrations and automation
 - **Advanced Analytics**: Comprehensive metrics dashboard with performance tracking and trend analysis
@@ -47,19 +47,41 @@ A native GUI build system for Linux From Scratch with MySQL backend, integrated 
 - **Performance Dashboard**: Real-time analytics dashboard with build metrics, success rates, and trend analysis
 - **Database Administration**: Comprehensive MySQL admin interface with table browsing, user management, and query execution
 - **In-House CI/CD System**: GitHub Actions-like pipeline system with Git integration and automated triggers
-- **Enhanced Build Monitoring**: Real-time process detection, stuck build alerts, and comprehensive status checking
+- **Enhanced Build Monitoring**: Real-time process detection, stuck build alerts, comprehensive status checking, and detailed compilation progress with live log streaming
 - **Multi-User Collaboration**: Complete user management with roles, permissions, bulk operations, and audit logging
 - **Comprehensive Settings**: Full configuration management for paths, build parameters, and system settings
 - **Automatic Build Cleanup**: Intelligent cleanup system that automatically cleans up failed builds and documents all actions
+- **Sudo Password Integration**: Secure sudo password prompts for LFS builds requiring elevated privileges for host system preparation
+- **Database Schema Optimization**: Enhanced database schema with comprehensive status tracking and data integrity
+
+## User Interface
+
+### Build Wizards
+- **🧙♂️ ML Build Wizard**: AI-powered build configuration with machine learning recommendations, system analysis, and performance optimization
+- **📝 Standard Build Wizard**: Traditional build configuration wizard for users who prefer manual setup and control
+- **Sudo Integration**: Both wizards include secure sudo password prompts for LFS builds requiring elevated privileges
+
+### Window Management
+- **Resizable Interface**: Fully resizable main window with minimize, maximize, and close buttons
+- **Minimum Size**: 800x600 minimum size to ensure usability
+- **Default Layout**: Optimized 1400x900 default size for comprehensive feature access
+- **Responsive Design**: Interface adapts to different window sizes and screen resolutions
+
+### Enhanced Monitoring
+- **Real-time Build Logs**: Live streaming of build progress with detailed compilation information
+- **Process Detection**: Intelligent detection of current build activities (gcc, make, configure operations)
+- **Status Indicators**: Visual indicators for build stages, progress, and system health
+- **Force Cancel**: Emergency build termination with comprehensive process cleanup
 
 ## Architecture
 
 ### Core Components
 
 1. **Database Layer** (`src/database/`)
-   - MySQL integration with full-text search
-   - Build logging and document storage
-   - Searchable build history
+   - MySQL integration with full-text search and optimized connection pooling
+   - Build logging and document storage with comprehensive status tracking
+   - Searchable build history with enhanced ENUM schema for build and stage statuses
+   - Data integrity improvements with proper status value handling (pending, running, completed, failed, cancelled, success, skipped, archived)
 
 2. **Build Engine** (`src/build/`)
    - Modular stage execution
@@ -77,14 +99,16 @@ A native GUI build system for Linux From Scratch with MySQL backend, integrated 
    - Build configuration management with snapshots
 
 4. **GUI Interface** (`src/gui/`)
-   - Native Qt interface with tabbed layout
-   - Real-time build monitoring with live log streaming
+   - Native Qt interface with resizable window and full window management controls
+   - Dual build wizard system (ML-optimized and standard configuration)
+   - Real-time build monitoring with enhanced live log streaming and compilation details
    - Paginated document browser with search capabilities
-   - System status monitoring with process tracking
+   - System status monitoring with intelligent process tracking and detection
    - Enterprise Git interface with visual tools
    - Integrated package management and file operations
    - Interactive kernel configuration dialog with context-sensitive help
    - Comprehensive security compliance scanner with multiple standards
+   - Sudo password integration for secure privilege escalation
 
 5. **Analysis Engine** (`src/analysis/`)
    - Advanced fault pattern recognition
