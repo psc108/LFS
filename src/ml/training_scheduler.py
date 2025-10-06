@@ -67,20 +67,20 @@ class TrainingScheduler:
         """Manually trigger ML model training"""
         try:
             if not force and not self._should_train():
-                return False, "Training conditions not met"
+                return {'success': False, 'message': "Training conditions not met"}
                 
             self.logger.info("Starting manual ML training")
             success = self._perform_training()
             
             if success:
                 self._notify_callbacks("manual_training_completed")
-                return True, "Training completed successfully"
+                return {'success': True, 'message': "Training completed successfully"}
             else:
-                return False, "Training failed"
+                return {'success': False, 'message': "Training failed"}
                 
         except Exception as e:
             self.logger.error(f"Manual training failed: {e}")
-            return False, f"Training error: {str(e)}"
+            return {'success': False, 'message': f"Training error: {str(e)}"}
             
     def on_build_completed(self, build_id: int, success: bool):
         """Handle build completion events for training triggers"""

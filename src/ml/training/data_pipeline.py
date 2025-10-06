@@ -45,7 +45,6 @@ class TrainingDataPipeline:
                 SELECT b.build_id, b.status, b.duration_seconds, b.config_name,
                        COUNT(bs.stage_name) as total_stages,
                        SUM(CASE WHEN bs.status = 'completed' THEN 1 ELSE 0 END) as completed_stages,
-                       AVG(bs.duration_seconds) as avg_stage_duration,
                        MAX(bs.stage_order) as max_stage_order
                 FROM builds b
                 LEFT JOIN build_stages bs ON b.build_id = bs.build_id
@@ -67,7 +66,6 @@ class TrainingDataPipeline:
                     'total_stages': build.get('total_stages', 0),
                     'completed_stages': build.get('completed_stages', 0),
                     'completion_ratio': (build.get('completed_stages', 0) / max(build.get('total_stages', 1), 1)),
-                    'avg_stage_duration': build.get('avg_stage_duration', 0) or 0,
                     'max_stage_order': build.get('max_stage_order', 0) or 0
                 }
                 
@@ -92,10 +90,7 @@ class TrainingDataPipeline:
             # Get successful builds with timing data
             builds = self.db.execute_query("""
                 SELECT b.build_id, b.duration_seconds, b.config_name,
-                       COUNT(bs.stage_name) as total_stages,
-                       AVG(bs.duration_seconds) as avg_stage_duration,
-                       MIN(bs.duration_seconds) as min_stage_duration,
-                       MAX(bs.duration_seconds) as max_stage_duration
+                       COUNT(bs.stage_name) as total_stages
                 FROM builds b
                 LEFT JOIN build_stages bs ON b.build_id = bs.build_id
                 WHERE b.start_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
@@ -122,10 +117,7 @@ class TrainingDataPipeline:
                 # Extract configuration features
                 feature_dict = {
                     'total_stages': build.get('total_stages', 0),
-                    'avg_stage_duration': build.get('avg_stage_duration', 0) or 0,
-                    'min_stage_duration': build.get('min_stage_duration', 0) or 0,
-                    'max_stage_duration': build.get('max_stage_duration', 0) or 0,
-                    'stage_duration_variance': self._calculate_stage_variance(build['build_id'])
+                    'build_duration': build.get('duration_seconds', 0) or 0
                 }
                 
                 features.append(feature_dict)
@@ -147,9 +139,7 @@ class TrainingDataPipeline:
             # Get successful builds as baseline
             builds = self.db.execute_query("""
                 SELECT b.build_id, b.duration_seconds,
-                       COUNT(bs.stage_name) as total_stages,
-                       AVG(bs.duration_seconds) as avg_stage_duration,
-                       STDDEV(bs.duration_seconds) as stage_duration_stddev
+                       COUNT(bs.stage_name) as total_stages
                 FROM builds b
                 LEFT JOIN build_stages bs ON b.build_id = bs.build_id
                 WHERE b.start_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
@@ -167,8 +157,6 @@ class TrainingDataPipeline:
                 feature_dict = {
                     'build_duration': build.get('duration_seconds', 0) or 0,
                     'total_stages': build.get('total_stages', 0),
-                    'avg_stage_duration': build.get('avg_stage_duration', 0) or 0,
-                    'stage_duration_stddev': build.get('stage_duration_stddev', 0) or 0,
                     'stage_failure_rate': self._get_historical_failure_rate(build['build_id'])
                 }
                 
@@ -204,20 +192,10 @@ class TrainingDataPipeline:
             return {}
     
     def _calculate_stage_variance(self, build_id: str) -> float:
-        """Calculate variance in stage durations for a build"""
+        """Calculate variance in stage durations for a build (simplified)"""
         try:
-            durations = self.db.execute_query("""
-                SELECT duration_seconds
-                FROM build_stages
-                WHERE build_id = %s AND duration_seconds IS NOT NULL
-            """, (build_id,), fetch=True)
-            
-            if not durations or len(durations) < 2:
-                return 0.0
-            
-            duration_values = [d['duration_seconds'] for d in durations]
-            return float(np.var(duration_values))
-            
+            # Since duration_seconds doesn't exist in build_stages, return 0
+            return 0.0
         except Exception as e:
             return 0.0
     
@@ -268,3 +246,53 @@ class TrainingDataPipeline:
             return False
         
         return True
+
+
+class DataPipeline:
+    """Main data pipeline for ML training and inference"""
+    
+    def __init__(self, db_manager):
+        self.db = db_manager
+        self.training_pipeline = TrainingDataPipeline(db_manager)
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("Data pipeline initialized successfully")
+    
+    def get_training_data(self, model_type: str, **kwargs) -> Tuple[List[Dict], List]:
+        """Get training data for specified model type"""
+        if model_type == 'failure_prediction':
+            return self.training_pipeline.prepare_failure_prediction_data(**kwargs)
+        elif model_type == 'performance_optimization':
+            return self.training_pipeline.prepare_performance_optimization_data(**kwargs)
+        elif model_type == 'anomaly_detection':
+            features = self.training_pipeline.prepare_anomaly_detection_data(**kwargs)
+            return features, []
+        else:
+            return [], []
+    
+    def is_ready(self) -> bool:
+        """Check if data pipeline is ready for use"""
+        return self.db is not None
+    
+    def get_status(self) -> Dict:
+        """Get data pipeline status"""
+        return {
+            'ready': self.is_ready(),
+            'database_connected': self.db is not None,
+            'training_pipeline_available': hasattr(self, 'training_pipeline')
+        }
+    
+    def prepare_failure_prediction_data(self, **kwargs):
+        """Prepare failure prediction training data"""
+        return self.training_pipeline.prepare_failure_prediction_data(**kwargs)
+    
+    def prepare_performance_optimization_data(self, **kwargs):
+        """Prepare performance optimization training data"""
+        return self.training_pipeline.prepare_performance_optimization_data(**kwargs)
+    
+    def prepare_anomaly_detection_data(self, **kwargs):
+        """Prepare anomaly detection training data"""
+        return self.training_pipeline.prepare_anomaly_detection_data(**kwargs)
+    
+    def validate_training_data(self, features, labels):
+        """Validate training data"""
+        return self.training_pipeline.validate_training_data(features, labels)

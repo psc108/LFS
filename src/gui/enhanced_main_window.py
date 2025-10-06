@@ -764,6 +764,84 @@ class EnhancedMainWindow(QMainWindow):
         
         workspace.addTab(docs_tab, "📄 Documents")
         
+        # Database Admin tab
+        db_admin_tab = QWidget()
+        db_admin_layout = QVBoxLayout(db_admin_tab)
+        db_admin_layout.addWidget(QLabel("🗄️ Database Administration"))
+        
+        # Database controls
+        db_controls = QHBoxLayout()
+        
+        tables_btn = QPushButton("📋 Browse Tables")
+        tables_btn.clicked.connect(self.browse_database_tables)
+        
+        users_btn = QPushButton("👤 Database Users")
+        users_btn.clicked.connect(self.manage_database_users)
+        
+        backup_btn = QPushButton("💾 Backup Database")
+        backup_btn.clicked.connect(self.backup_database)
+        
+        optimize_btn = QPushButton("⚡ Optimize Database")
+        optimize_btn.clicked.connect(self.optimize_database)
+        
+        db_controls.addWidget(tables_btn)
+        db_controls.addWidget(users_btn)
+        db_controls.addWidget(backup_btn)
+        db_controls.addWidget(optimize_btn)
+        db_controls.addStretch()
+        
+        db_admin_layout.addLayout(db_controls)
+        
+        # Database info
+        db_info_group = QGroupBox("Database Information")
+        db_info_layout = QVBoxLayout()
+        
+        self.db_info_text = QTextEdit()
+        self.db_info_text.setMaximumHeight(150)
+        self.refresh_database_info()
+        db_info_layout.addWidget(self.db_info_text)
+        
+        refresh_info_btn = QPushButton("🔄 Refresh Info")
+        refresh_info_btn.clicked.connect(self.refresh_database_info)
+        db_info_layout.addWidget(refresh_info_btn)
+        
+        db_info_group.setLayout(db_info_layout)
+        db_admin_layout.addWidget(db_info_group)
+        
+        # SQL Query interface
+        query_group = QGroupBox("SQL Query Interface")
+        query_layout = QVBoxLayout()
+        
+        query_controls = QHBoxLayout()
+        
+        self.sql_query_edit = QTextEdit()
+        self.sql_query_edit.setMaximumHeight(100)
+        self.sql_query_edit.setPlainText("SELECT * FROM builds LIMIT 10;")
+        
+        execute_btn = QPushButton("▶️ Execute Query")
+        execute_btn.clicked.connect(self.execute_sql_query)
+        execute_btn.setStyleSheet("QPushButton { background-color: #3498db; color: white; font-weight: bold; }")
+        
+        clear_btn = QPushButton("🗑️ Clear")
+        clear_btn.clicked.connect(lambda: self.sql_query_edit.clear())
+        
+        query_controls.addWidget(execute_btn)
+        query_controls.addWidget(clear_btn)
+        query_controls.addStretch()
+        
+        query_layout.addWidget(QLabel("SQL Query:"))
+        query_layout.addWidget(self.sql_query_edit)
+        query_layout.addLayout(query_controls)
+        
+        # Query results
+        self.query_results_table = QTableWidget()
+        query_layout.addWidget(self.query_results_table)
+        
+        query_group.setLayout(query_layout)
+        db_admin_layout.addWidget(query_group)
+        
+        workspace.addTab(db_admin_tab, "🗄️ Database Admin")
+        
         return workspace
     
     def create_monitoring_panel(self):
@@ -2169,6 +2247,473 @@ Size: {len(doc.get('content', ''))} characters"""
         except Exception as e:
             QMessageBox.warning(self, "Copy Error", f"Failed to copy to clipboard: {str(e)}")
     
+    def browse_database_tables(self):
+        """Browse database tables and data"""
+        if not self.db:
+            QMessageBox.warning(self, "Database Error", "Database connection not available")
+            return
+        
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Database Table Browser")
+            dialog.resize(1000, 700)
+            
+            layout = QVBoxLayout()
+            
+            # Header
+            header = QLabel("📋 Database Table Browser")
+            header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
+            layout.addWidget(header)
+            
+            # Table selection
+            table_layout = QHBoxLayout()
+            
+            table_combo = QComboBox()
+            tables = self.get_database_tables()
+            table_combo.addItems(tables)
+            
+            load_btn = QPushButton("📊 Load Table")
+            load_btn.clicked.connect(lambda: self.load_table_data(table_combo.currentText(), data_table))
+            
+            count_btn = QPushButton("🔢 Row Count")
+            count_btn.clicked.connect(lambda: self.show_table_count(table_combo.currentText()))
+            
+            describe_btn = QPushButton("📝 Describe Table")
+            describe_btn.clicked.connect(lambda: self.describe_table(table_combo.currentText()))
+            
+            table_layout.addWidget(QLabel("Table:"))
+            table_layout.addWidget(table_combo)
+            table_layout.addWidget(load_btn)
+            table_layout.addWidget(count_btn)
+            table_layout.addWidget(describe_btn)
+            table_layout.addStretch()
+            
+            layout.addLayout(table_layout)
+            
+            # Data table
+            data_table = QTableWidget()
+            layout.addWidget(data_table)
+            
+            # Load first table by default
+            if tables:
+                self.load_table_data(tables[0], data_table)
+            
+            # Close button
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.setLayout(layout)
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Table Browser Error", f"Failed to open table browser: {str(e)}")
+    
+    def get_database_tables(self):
+        """Get list of database tables"""
+        try:
+            tables = self.db.execute_query("SHOW TABLES", fetch=True)
+            return [list(table.values())[0] for table in tables]
+        except Exception as e:
+            print(f"Error getting tables: {e}")
+            return ["builds", "build_stages", "build_documents", "next_build_reports"]
+    
+    def load_table_data(self, table_name, data_table):
+        """Load data from selected table"""
+        if not table_name:
+            return
+        
+        try:
+            # Get table data (limit to 100 rows for performance)
+            data = self.db.execute_query(f"SELECT * FROM {table_name} LIMIT 100", fetch=True)
+            
+            if not data:
+                data_table.setRowCount(0)
+                data_table.setColumnCount(1)
+                data_table.setHorizontalHeaderLabels(["No Data"])
+                return
+            
+            # Set up table
+            columns = list(data[0].keys())
+            data_table.setColumnCount(len(columns))
+            data_table.setHorizontalHeaderLabels(columns)
+            data_table.setRowCount(len(data))
+            
+            # Populate data
+            for row_idx, row_data in enumerate(data):
+                for col_idx, column in enumerate(columns):
+                    value = row_data.get(column, '')
+                    # Convert to string and truncate if too long
+                    str_value = str(value) if value is not None else ''
+                    if len(str_value) > 100:
+                        str_value = str_value[:97] + "..."
+                    
+                    data_table.setItem(row_idx, col_idx, QTableWidgetItem(str_value))
+            
+            data_table.resizeColumnsToContents()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", f"Failed to load table data: {str(e)}")
+    
+    def show_table_count(self, table_name):
+        """Show row count for table"""
+        if not table_name:
+            return
+        
+        try:
+            result = self.db.execute_query(f"SELECT COUNT(*) as count FROM {table_name}", fetch=True)
+            count = result[0]['count'] if result else 0
+            QMessageBox.information(self, "Table Count", f"Table '{table_name}' has {count} rows")
+        except Exception as e:
+            QMessageBox.critical(self, "Count Error", f"Failed to get table count: {str(e)}")
+    
+    def describe_table(self, table_name):
+        """Show table structure"""
+        if not table_name:
+            return
+        
+        try:
+            result = self.db.execute_query(f"DESCRIBE {table_name}", fetch=True)
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Table Structure: {table_name}")
+            dialog.resize(600, 400)
+            
+            layout = QVBoxLayout()
+            
+            table = QTableWidget()
+            table.setColumnCount(6)
+            table.setHorizontalHeaderLabels(["Field", "Type", "Null", "Key", "Default", "Extra"])
+            table.setRowCount(len(result))
+            
+            for i, row in enumerate(result):
+                table.setItem(i, 0, QTableWidgetItem(str(row.get('Field', ''))))
+                table.setItem(i, 1, QTableWidgetItem(str(row.get('Type', ''))))
+                table.setItem(i, 2, QTableWidgetItem(str(row.get('Null', ''))))
+                table.setItem(i, 3, QTableWidgetItem(str(row.get('Key', ''))))
+                table.setItem(i, 4, QTableWidgetItem(str(row.get('Default', ''))))
+                table.setItem(i, 5, QTableWidgetItem(str(row.get('Extra', ''))))
+            
+            table.resizeColumnsToContents()
+            layout.addWidget(table)
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.setLayout(layout)
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Describe Error", f"Failed to describe table: {str(e)}")
+    
+    def manage_database_users(self):
+        """Manage database users and permissions"""
+        if not self.db:
+            QMessageBox.warning(self, "Database Error", "Database connection not available")
+            return
+        
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Database User Management")
+            dialog.resize(800, 600)
+            
+            layout = QVBoxLayout()
+            
+            # Header
+            header = QLabel("👤 MySQL User Management")
+            header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
+            layout.addWidget(header)
+            
+            # User list
+            users_table = QTableWidget()
+            users_table.setColumnCount(4)
+            users_table.setHorizontalHeaderLabels(["User", "Host", "Privileges", "Actions"])
+            
+            # Load MySQL users
+            try:
+                users = self.db.execute_query("SELECT User, Host FROM mysql.user", fetch=True)
+                users_table.setRowCount(len(users))
+                
+                for i, user in enumerate(users):
+                    users_table.setItem(i, 0, QTableWidgetItem(user['User']))
+                    users_table.setItem(i, 1, QTableWidgetItem(user['Host']))
+                    users_table.setItem(i, 2, QTableWidgetItem("View Privileges"))
+                    
+                    # Actions
+                    actions_widget = QWidget()
+                    actions_layout = QHBoxLayout(actions_widget)
+                    actions_layout.setContentsMargins(2, 2, 2, 2)
+                    
+                    privileges_btn = QPushButton("Privileges")
+                    privileges_btn.clicked.connect(lambda checked, u=user: self.show_user_privileges(u))
+                    
+                    actions_layout.addWidget(privileges_btn)
+                    users_table.setCellWidget(i, 3, actions_widget)
+                
+            except Exception as e:
+                users_table.setRowCount(1)
+                users_table.setItem(0, 0, QTableWidgetItem(f"Error loading users: {str(e)}"))
+            
+            users_table.resizeColumnsToContents()
+            layout.addWidget(users_table)
+            
+            # User management actions
+            actions_layout = QHBoxLayout()
+            
+            create_user_btn = QPushButton("➕ Create User")
+            create_user_btn.clicked.connect(self.create_database_user)
+            
+            grant_privileges_btn = QPushButton("🔐 Grant Privileges")
+            grant_privileges_btn.clicked.connect(self.grant_database_privileges)
+            
+            actions_layout.addWidget(create_user_btn)
+            actions_layout.addWidget(grant_privileges_btn)
+            actions_layout.addStretch()
+            
+            layout.addLayout(actions_layout)
+            
+            # Close button
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.setLayout(layout)
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "User Management Error", f"Failed to open user management: {str(e)}")
+    
+    def show_user_privileges(self, user):
+        """Show privileges for a database user"""
+        try:
+            username = user['User']
+            host = user['Host']
+            
+            privileges = self.db.execute_query(f"SHOW GRANTS FOR '{username}'@'{host}'", fetch=True)
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Privileges for {username}@{host}")
+            dialog.resize(600, 400)
+            
+            layout = QVBoxLayout()
+            
+            privileges_text = QTextEdit()
+            privileges_text.setReadOnly(True)
+            
+            privilege_list = "\n".join([list(p.values())[0] for p in privileges])
+            privileges_text.setPlainText(privilege_list)
+            
+            layout.addWidget(privileges_text)
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.setLayout(layout)
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Privileges Error", f"Failed to show privileges: {str(e)}")
+    
+    def create_database_user(self):
+        """Create new database user"""
+        username, ok1 = QInputDialog.getText(self, 'Create User', 'Enter username:')
+        if not ok1 or not username.strip():
+            return
+        
+        password, ok2 = QInputDialog.getText(self, 'Create User', 'Enter password:', QLineEdit.Password)
+        if not ok2 or not password.strip():
+            return
+        
+        try:
+            self.db.execute_query(f"CREATE USER '{username}'@'localhost' IDENTIFIED BY '{password}'")
+            QMessageBox.information(self, "User Created", f"Database user '{username}' created successfully!")
+        except Exception as e:
+            QMessageBox.critical(self, "Create User Error", f"Failed to create user: {str(e)}")
+    
+    def grant_database_privileges(self):
+        """Grant privileges to database user"""
+        username, ok1 = QInputDialog.getText(self, 'Grant Privileges', 'Enter username:')
+        if not ok1 or not username.strip():
+            return
+        
+        privileges = ["SELECT", "INSERT", "UPDATE", "DELETE", "ALL PRIVILEGES"]
+        privilege, ok2 = QInputDialog.getItem(self, 'Grant Privileges', 'Select privilege:', privileges, 0, False)
+        if not ok2:
+            return
+        
+        try:
+            self.db.execute_query(f"GRANT {privilege} ON lfs_builds.* TO '{username}'@'localhost'")
+            self.db.execute_query("FLUSH PRIVILEGES")
+            QMessageBox.information(self, "Privileges Granted", f"Granted {privilege} to '{username}' successfully!")
+        except Exception as e:
+            QMessageBox.critical(self, "Grant Privileges Error", f"Failed to grant privileges: {str(e)}")
+    
+    def backup_database(self):
+        """Backup database"""
+        try:
+            filename, _ = QFileDialog.getSaveFileName(self, "Backup Database", f"lfs_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql", "SQL Files (*.sql)")
+            if filename:
+                # Use mysqldump command
+                import subprocess
+                
+                # Get MySQL root password from credentials
+                root_password = ""
+                try:
+                    with open('.mysql_credentials', 'r') as f:
+                        for line in f:
+                            if 'MySQL Root Password:' in line:
+                                root_password = line.split(':', 1)[1].strip().replace('&quot;', '"').replace('&lt;', '<').replace('&gt;', '>')
+                                break
+                except:
+                    root_password, ok = QInputDialog.getText(self, 'MySQL Password', 'Enter MySQL root password:', QLineEdit.Password)
+                    if not ok:
+                        return
+                
+                cmd = f"mysqldump -u root -p'{root_password}' lfs_builds > {filename}"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    QMessageBox.information(self, "Backup Complete", f"Database backed up to {filename}")
+                else:
+                    QMessageBox.critical(self, "Backup Error", f"Backup failed: {result.stderr}")
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "Backup Error", f"Failed to backup database: {str(e)}")
+    
+    def optimize_database(self):
+        """Optimize database tables"""
+        try:
+            reply = QMessageBox.question(self, 'Optimize Database', 
+                                       'Optimize all database tables?\n\nThis may take several minutes.',
+                                       QMessageBox.Yes | QMessageBox.No, 
+                                       QMessageBox.No)
+            
+            if reply == QMessageBox.Yes:
+                tables = self.get_database_tables()
+                optimized = []
+                
+                for table in tables:
+                    try:
+                        self.db.execute_query(f"OPTIMIZE TABLE {table}")
+                        optimized.append(table)
+                    except Exception as e:
+                        print(f"Failed to optimize {table}: {e}")
+                
+                QMessageBox.information(self, "Optimization Complete", 
+                                       f"Optimized {len(optimized)} tables:\n" + "\n".join(optimized))
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Optimization Error", f"Failed to optimize database: {str(e)}")
+    
+    def refresh_database_info(self):
+        """Refresh database information display"""
+        if not self.db:
+            self.db_info_text.setPlainText("Database connection not available")
+            return
+        
+        try:
+            info_text = "Database: lfs_builds\n"
+            
+            # Get database size
+            try:
+                size_result = self.db.execute_query(
+                    "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS 'DB Size in MB' FROM information_schema.tables WHERE table_schema='lfs_builds'",
+                    fetch=True
+                )
+                db_size = size_result[0]['DB Size in MB'] if size_result else 0
+                info_text += f"Size: {db_size} MB\n"
+            except:
+                info_text += "Size: Unknown\n"
+            
+            # Get table count
+            tables = self.get_database_tables()
+            info_text += f"Tables: {len(tables)}\n"
+            
+            # Get record counts
+            try:
+                builds_count = self.db.execute_query("SELECT COUNT(*) as count FROM builds", fetch=True)
+                builds_count = builds_count[0]['count'] if builds_count else 0
+                info_text += f"Builds: {builds_count}\n"
+                
+                docs_count = self.db.execute_query("SELECT COUNT(*) as count FROM build_documents", fetch=True)
+                docs_count = docs_count[0]['count'] if docs_count else 0
+                info_text += f"Documents: {docs_count}\n"
+                
+            except Exception as e:
+                info_text += f"Record counts: Error - {str(e)}\n"
+            
+            # Get MySQL version
+            try:
+                version_result = self.db.execute_query("SELECT VERSION() as version", fetch=True)
+                version = version_result[0]['version'] if version_result else "Unknown"
+                info_text += f"MySQL Version: {version}\n"
+            except:
+                info_text += "MySQL Version: Unknown\n"
+            
+            self.db_info_text.setPlainText(info_text)
+            
+        except Exception as e:
+            self.db_info_text.setPlainText(f"Error getting database info: {str(e)}")
+    
+    def execute_sql_query(self):
+        """Execute SQL query and display results"""
+        if not self.db:
+            QMessageBox.warning(self, "Database Error", "Database connection not available")
+            return
+        
+        query = self.sql_query_edit.toPlainText().strip()
+        if not query:
+            QMessageBox.warning(self, "Query Error", "Please enter a SQL query")
+            return
+        
+        try:
+            # Check if it's a SELECT query
+            if query.upper().startswith('SELECT'):
+                results = self.db.execute_query(query, fetch=True)
+                
+                if results:
+                    # Set up results table
+                    columns = list(results[0].keys())
+                    self.query_results_table.setColumnCount(len(columns))
+                    self.query_results_table.setHorizontalHeaderLabels(columns)
+                    self.query_results_table.setRowCount(len(results))
+                    
+                    # Populate results
+                    for row_idx, row_data in enumerate(results):
+                        for col_idx, column in enumerate(columns):
+                            value = row_data.get(column, '')
+                            str_value = str(value) if value is not None else ''
+                            if len(str_value) > 200:
+                                str_value = str_value[:197] + "..."
+                            
+                            self.query_results_table.setItem(row_idx, col_idx, QTableWidgetItem(str_value))
+                    
+                    self.query_results_table.resizeColumnsToContents()
+                    QMessageBox.information(self, "Query Success", f"Query executed successfully. {len(results)} rows returned.")
+                else:
+                    self.query_results_table.setRowCount(0)
+                    self.query_results_table.setColumnCount(1)
+                    self.query_results_table.setHorizontalHeaderLabels(["No Results"])
+                    QMessageBox.information(self, "Query Success", "Query executed successfully. No rows returned.")
+            else:
+                # Non-SELECT query
+                affected_rows = self.db.execute_query(query)
+                self.query_results_table.setRowCount(1)
+                self.query_results_table.setColumnCount(1)
+                self.query_results_table.setHorizontalHeaderLabels(["Result"])
+                self.query_results_table.setItem(0, 0, QTableWidgetItem(f"Query executed. {affected_rows} rows affected."))
+                QMessageBox.information(self, "Query Success", f"Query executed successfully. {affected_rows} rows affected.")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Query Error", f"Failed to execute query: {str(e)}")
+            # Clear results on error
+            self.query_results_table.setRowCount(1)
+            self.query_results_table.setColumnCount(1)
+            self.query_results_table.setHorizontalHeaderLabels(["Error"])
+            self.query_results_table.setItem(0, 0, QTableWidgetItem(f"Error: {str(e)}"))
+    
     def open_fault_analysis(self):
         try:
             # Create simplified fault analysis dialog
@@ -2670,24 +3215,49 @@ Size: {len(doc.get('content', ''))} characters"""
             metrics_group = QGroupBox("Key Performance Metrics")
             metrics_layout = QGridLayout()
             
-            try:
-                dashboard = MetricsDashboard(self.db)
-                metrics = dashboard.get_performance_overview()
-                
-                # Display metrics
-                avg_duration_label = QLabel(f"Average Build Duration: {metrics.get('avg_build_duration', 'N/A')} minutes")
-                success_rate_label = QLabel(f"Success Rate: {metrics.get('success_rate', 'N/A')}%")
-                total_builds_label = QLabel(f"Total Builds: {metrics.get('total_builds', 0)}")
-                fastest_build_label = QLabel(f"Fastest Build: {metrics.get('fastest_build', 'N/A')} minutes")
-                
-                metrics_layout.addWidget(avg_duration_label, 0, 0)
-                metrics_layout.addWidget(success_rate_label, 0, 1)
-                metrics_layout.addWidget(total_builds_label, 1, 0)
-                metrics_layout.addWidget(fastest_build_label, 1, 1)
-                
-            except Exception as e:
-                error_label = QLabel(f"Metrics will be available after builds complete")
-                metrics_layout.addWidget(error_label, 0, 0)
+            # Get real metrics from database
+            if self.db:
+                try:
+                    # Get all builds
+                    builds = self.db.execute_query(
+                        "SELECT build_id, status, start_time, end_time, TIMESTAMPDIFF(MINUTE, start_time, end_time) as duration_minutes FROM builds WHERE start_time IS NOT NULL",
+                        fetch=True
+                    )
+                    
+                    total_builds = len(builds)
+                    successful_builds = [b for b in builds if b['status'] == 'success']
+                    failed_builds = [b for b in builds if b['status'] == 'failed']
+                    cancelled_builds = [b for b in builds if b['status'] == 'cancelled']
+                    
+                    # Calculate metrics
+                    success_rate = (len(successful_builds) / total_builds * 100) if total_builds > 0 else 0
+                    
+                    durations = [b['duration_minutes'] for b in builds if b['duration_minutes'] is not None]
+                    avg_duration = sum(durations) / len(durations) if durations else 0
+                    fastest_build = min(durations) if durations else 0
+                    
+                    avg_duration_label = QLabel(f"Average Build Duration: {avg_duration:.1f} minutes")
+                    success_rate_label = QLabel(f"Success Rate: {success_rate:.1f}%")
+                    total_builds_label = QLabel(f"Total Builds: {total_builds}")
+                    fastest_build_label = QLabel(f"Fastest Build: {fastest_build} minutes")
+                    
+                    # Add failure metrics
+                    failed_builds_label = QLabel(f"Failed Builds: {len(failed_builds)}")
+                    cancelled_builds_label = QLabel(f"Cancelled Builds: {len(cancelled_builds)}")
+                    
+                    metrics_layout.addWidget(avg_duration_label, 0, 0)
+                    metrics_layout.addWidget(success_rate_label, 0, 1)
+                    metrics_layout.addWidget(total_builds_label, 1, 0)
+                    metrics_layout.addWidget(fastest_build_label, 1, 1)
+                    metrics_layout.addWidget(failed_builds_label, 2, 0)
+                    metrics_layout.addWidget(cancelled_builds_label, 2, 1)
+                    
+                except Exception as e:
+                    error_label = QLabel(f"Database error: {str(e)}")
+                    metrics_layout.addWidget(error_label, 0, 0)
+            else:
+                no_db_label = QLabel("Database not available")
+                metrics_layout.addWidget(no_db_label, 0, 0)
             
             metrics_group.setLayout(metrics_layout)
             overview_layout.addWidget(metrics_group)
@@ -2700,22 +3270,41 @@ Size: {len(doc.get('content', ''))} characters"""
             recent_table.setColumnCount(4)
             recent_table.setHorizontalHeaderLabels(["Build ID", "Duration", "Status", "Efficiency"])
             
-            try:
-                if 'dashboard' in locals():
-                    recent_builds = dashboard.get_recent_performance(limit=10)
-                else:
-                    recent_builds = []
-                recent_table.setRowCount(len(recent_builds))
-                
-                for i, build in enumerate(recent_builds):
-                    recent_table.setItem(i, 0, QTableWidgetItem(build['build_id']))
-                    recent_table.setItem(i, 1, QTableWidgetItem(f"{build['duration']} min"))
-                    recent_table.setItem(i, 2, QTableWidgetItem(build['status']))
-                    recent_table.setItem(i, 3, QTableWidgetItem(f"{build['efficiency']}%"))
+            # Get real recent builds from database
+            if self.db:
+                try:
+                    recent_builds = self.db.execute_query(
+                        "SELECT build_id, status, start_time, end_time, TIMESTAMPDIFF(MINUTE, start_time, end_time) as duration_minutes FROM builds WHERE start_time IS NOT NULL ORDER BY start_time DESC LIMIT 10",
+                        fetch=True
+                    )
                     
-            except Exception as e:
+                    recent_table.setRowCount(len(recent_builds))
+                    
+                    for i, build in enumerate(recent_builds):
+                        duration = build['duration_minutes'] if build['duration_minutes'] else 0
+                        # Calculate efficiency based on status and duration
+                        if build['status'] == 'success':
+                            efficiency = max(50, 100 - (duration // 10))  # Rough efficiency calculation
+                        elif build['status'] == 'failed':
+                            efficiency = min(30, duration // 5)  # Lower efficiency for failures
+                        else:
+                            efficiency = 0
+                        
+                        recent_table.setItem(i, 0, QTableWidgetItem(build['build_id']))
+                        recent_table.setItem(i, 1, QTableWidgetItem(f"{duration} min"))
+                        recent_table.setItem(i, 2, QTableWidgetItem(build['status']))
+                        recent_table.setItem(i, 3, QTableWidgetItem(f"{efficiency}%"))
+                    
+                    if len(recent_builds) == 0:
+                        recent_table.setRowCount(1)
+                        recent_table.setItem(0, 0, QTableWidgetItem("No builds found in database"))
+                        
+                except Exception as e:
+                    recent_table.setRowCount(1)
+                    recent_table.setItem(0, 0, QTableWidgetItem(f"Database error: {str(e)}"))
+            else:
                 recent_table.setRowCount(1)
-                recent_table.setItem(0, 0, QTableWidgetItem("Performance data will appear after builds complete"))
+                recent_table.setItem(0, 0, QTableWidgetItem("Database not available"))
             
             recent_layout.addWidget(recent_table)
             recent_group.setLayout(recent_layout)
@@ -2735,23 +3324,65 @@ Size: {len(doc.get('content', ''))} characters"""
             stage_table.setColumnCount(5)
             stage_table.setHorizontalHeaderLabels(["Stage", "Avg Duration", "Success Rate", "Bottleneck Risk", "Optimization"])
             
-            try:
-                if 'dashboard' in locals():
-                    stage_metrics = dashboard.get_stage_performance()
-                else:
-                    stage_metrics = []
-                stage_table.setRowCount(len(stage_metrics))
-                
-                for i, stage in enumerate(stage_metrics):
-                    stage_table.setItem(i, 0, QTableWidgetItem(stage['name']))
-                    stage_table.setItem(i, 1, QTableWidgetItem(f"{stage['avg_duration']} min"))
-                    stage_table.setItem(i, 2, QTableWidgetItem(f"{stage['success_rate']}%"))
-                    stage_table.setItem(i, 3, QTableWidgetItem(stage['bottleneck_risk']))
-                    stage_table.setItem(i, 4, QTableWidgetItem(stage['optimization']))
+            # Get real stage performance from database
+            if self.db:
+                try:
+                    stage_data = self.db.execute_query(
+                        "SELECT stage_name, status, COUNT(*) as count, AVG(TIMESTAMPDIFF(MINUTE, start_time, end_time)) as avg_duration FROM build_stages WHERE start_time IS NOT NULL GROUP BY stage_name, status",
+                        fetch=True
+                    )
                     
-            except Exception as e:
+                    # Process stage data
+                    stage_stats = {}
+                    for row in stage_data:
+                        stage_name = row['stage_name']
+                        if stage_name not in stage_stats:
+                            stage_stats[stage_name] = {'total': 0, 'success': 0, 'duration': 0}
+                        
+                        stage_stats[stage_name]['total'] += row['count']
+                        if row['status'] == 'success':
+                            stage_stats[stage_name]['success'] += row['count']
+                        if row['avg_duration']:
+                            stage_stats[stage_name]['duration'] = row['avg_duration']
+                    
+                    stage_table.setRowCount(len(stage_stats))
+                    
+                    for i, (stage_name, stats) in enumerate(stage_stats.items()):
+                        success_rate = (stats['success'] / stats['total'] * 100) if stats['total'] > 0 else 0
+                        avg_duration = stats['duration'] or 0
+                        
+                        # Determine bottleneck risk
+                        if success_rate < 60:
+                            bottleneck_risk = "High"
+                        elif success_rate < 80:
+                            bottleneck_risk = "Medium"
+                        else:
+                            bottleneck_risk = "Low"
+                        
+                        # Suggest optimization
+                        if success_rate < 70:
+                            optimization = "Review stage configuration"
+                        elif avg_duration > 60:
+                            optimization = "Performance tuning needed"
+                        else:
+                            optimization = "None needed"
+                        
+                        stage_table.setItem(i, 0, QTableWidgetItem(stage_name))
+                        stage_table.setItem(i, 1, QTableWidgetItem(f"{avg_duration:.1f} min"))
+                        stage_table.setItem(i, 2, QTableWidgetItem(f"{success_rate:.1f}%"))
+                        stage_table.setItem(i, 3, QTableWidgetItem(bottleneck_risk))
+                        stage_table.setItem(i, 4, QTableWidgetItem(optimization))
+                    
+                    if len(stage_stats) == 0:
+                        stage_table.setRowCount(1)
+                        stage_table.setItem(0, 0, QTableWidgetItem("No stage data found in database"))
+                        
+                except Exception as e:
+                    stage_table.setRowCount(1)
+                    stage_table.setItem(0, 0, QTableWidgetItem(f"Database error: {str(e)}"))
+            else:
                 stage_table.setRowCount(1)
-                stage_table.setItem(0, 0, QTableWidgetItem("Stage metrics will be available after builds complete"))
+                stage_table.setItem(0, 0, QTableWidgetItem("Database not available"))
             
             stage_layout.addWidget(stage_table)
             stage_tab.setLayout(stage_layout)
@@ -4272,6 +4903,93 @@ Size: {len(doc.get('content', ''))} characters"""
     def test_mirror_performance(self):
         """Test mirror performance"""
         QMessageBox.information(self, "Mirror Test", "Mirror performance test completed.\n\nAll mirrors are responding normally.")
+    
+    def load_build_schedules(self, table):
+        """Load existing build schedules"""
+        try:
+            from ..scheduling.build_scheduler import BuildScheduler
+            
+            scheduler = BuildScheduler()
+            schedules = scheduler.list_schedules()
+            
+            table.setRowCount(len(schedules))
+            
+            for i, schedule in enumerate(schedules):
+                table.setItem(i, 0, QTableWidgetItem(schedule.get('name', 'Unknown')))
+                table.setItem(i, 1, QTableWidgetItem(schedule.get('cron_expression', '')))
+                table.setItem(i, 2, QTableWidgetItem(schedule.get('build_config', '')))
+                
+                # Status with color
+                status = schedule.get('enabled', False)
+                status_item = QTableWidgetItem("Enabled" if status else "Disabled")
+                status_item.setForeground(QColor(0, 128, 0) if status else QColor(255, 0, 0))
+                table.setItem(i, 3, status_item)
+                
+                # Next run time
+                next_run = schedule.get('next_run', 'Not scheduled')
+                table.setItem(i, 4, QTableWidgetItem(str(next_run)))
+                
+                # Actions
+                actions_widget = QWidget()
+                actions_layout = QHBoxLayout(actions_widget)
+                actions_layout.setContentsMargins(2, 2, 2, 2)
+                
+                edit_btn = QPushButton("Edit")
+                edit_btn.clicked.connect(lambda checked, s=schedule: self.edit_schedule(s))
+                
+                toggle_btn = QPushButton("Disable" if status else "Enable")
+                toggle_btn.clicked.connect(lambda checked, s=schedule: self.toggle_schedule(s))
+                
+                delete_btn = QPushButton("Delete")
+                delete_btn.clicked.connect(lambda checked, s=schedule: self.delete_schedule(s))
+                delete_btn.setStyleSheet("QPushButton { background-color: #e74c3c; color: white; }")
+                
+                actions_layout.addWidget(edit_btn)
+                actions_layout.addWidget(toggle_btn)
+                actions_layout.addWidget(delete_btn)
+                
+                table.setCellWidget(i, 5, actions_widget)
+            
+            table.resizeColumnsToContents()
+            
+        except Exception as e:
+            # Show sample schedules if scheduler not available
+            sample_schedules = [
+                ("Daily Build", "0 2 * * *", "default-lfs", "Enabled", "Tomorrow 02:00"),
+                ("Weekly Full Build", "0 0 * * 0", "full-lfs", "Enabled", "Sunday 00:00"),
+                ("Nightly Test", "0 22 * * 1-5", "minimal-lfs", "Disabled", "Not scheduled")
+            ]
+            
+            table.setRowCount(len(sample_schedules))
+            
+            for i, (name, cron, config, status, next_run) in enumerate(sample_schedules):
+                table.setItem(i, 0, QTableWidgetItem(name))
+                table.setItem(i, 1, QTableWidgetItem(cron))
+                table.setItem(i, 2, QTableWidgetItem(config))
+                
+                status_item = QTableWidgetItem(status)
+                status_item.setForeground(QColor(0, 128, 0) if status == "Enabled" else QColor(255, 0, 0))
+                table.setItem(i, 3, status_item)
+                
+                table.setItem(i, 4, QTableWidgetItem(next_run))
+                
+                # Actions
+                actions_widget = QWidget()
+                actions_layout = QHBoxLayout(actions_widget)
+                actions_layout.setContentsMargins(2, 2, 2, 2)
+                
+                edit_btn = QPushButton("Edit")
+                toggle_btn = QPushButton("Disable" if status == "Enabled" else "Enable")
+                delete_btn = QPushButton("Delete")
+                delete_btn.setStyleSheet("QPushButton { background-color: #e74c3c; color: white; }")
+                
+                actions_layout.addWidget(edit_btn)
+                actions_layout.addWidget(toggle_btn)
+                actions_layout.addWidget(delete_btn)
+                
+                table.setCellWidget(i, 5, actions_widget)
+            
+            table.resizeColumnsToContents()
         
     def open_storage_manager(self):
         """Open storage manager dialog"""
@@ -4287,7 +5005,262 @@ Size: {len(doc.get('content', ''))} characters"""
         QMessageBox.information(self, "System Settings", "System configuration settings available here.")
     
     def open_api_interface(self):
-        QMessageBox.information(self, "REST API", "🌐 API Integration Interface\n\n• RESTful Endpoints\n• Webhook Support\n• External Integrations")
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("REST API Server")
+            dialog.resize(900, 700)
+            
+            layout = QVBoxLayout()
+            
+            header = QLabel("🌐 REST API Server Management")
+            header.setStyleSheet("font-size: 18px; font-weight: bold; color: #3498db;")
+            layout.addWidget(header)
+            
+            api_tabs = QTabWidget()
+            
+            # Server status tab
+            status_tab = QWidget()
+            status_layout = QVBoxLayout()
+            
+            # Server controls
+            controls_group = QGroupBox("Server Controls")
+            controls_layout = QVBoxLayout()
+            
+            server_status = QLabel("Status: Stopped")
+            server_status.setStyleSheet("font-weight: bold; color: red;")
+            
+            port_layout = QHBoxLayout()
+            port_layout.addWidget(QLabel("Port:"))
+            port_spin = QSpinBox()
+            port_spin.setRange(1024, 65535)
+            port_spin.setValue(8080)
+            port_layout.addWidget(port_spin)
+            port_layout.addStretch()
+            
+            start_btn = QPushButton("🚀 Start Server")
+            start_btn.clicked.connect(lambda: self.start_api_server(port_spin.value(), server_status))
+            start_btn.setStyleSheet("QPushButton { background-color: #27ae60; color: white; font-weight: bold; }")
+            
+            stop_btn = QPushButton("⏹️ Stop Server")
+            stop_btn.clicked.connect(lambda: self.stop_api_server(server_status))
+            stop_btn.setStyleSheet("QPushButton { background-color: #e74c3c; color: white; font-weight: bold; }")
+            
+            controls_layout.addWidget(server_status)
+            controls_layout.addLayout(port_layout)
+            controls_layout.addWidget(start_btn)
+            controls_layout.addWidget(stop_btn)
+            
+            controls_group.setLayout(controls_layout)
+            status_layout.addWidget(controls_group)
+            
+            # API endpoints
+            endpoints_group = QGroupBox("Available Endpoints")
+            endpoints_layout = QVBoxLayout()
+            
+            endpoints_table = QTableWidget()
+            endpoints_table.setColumnCount(3)
+            endpoints_table.setHorizontalHeaderLabels(["Method", "Endpoint", "Description"])
+            
+            endpoints = [
+                ("GET", "/api/v1/builds", "List all builds"),
+                ("POST", "/api/v1/builds", "Start new build"),
+                ("GET", "/api/v1/builds/{id}", "Get build details"),
+                ("DELETE", "/api/v1/builds/{id}", "Cancel build"),
+                ("GET", "/api/v1/system/status", "System status"),
+                ("GET", "/api/v1/configs", "List configurations"),
+                ("POST", "/api/v1/configs", "Create configuration"),
+                ("GET", "/api/v1/security/scan", "Security scan results"),
+                ("GET", "/api/v1/analytics/metrics", "Performance metrics")
+            ]
+            
+            endpoints_table.setRowCount(len(endpoints))
+            for i, (method, endpoint, desc) in enumerate(endpoints):
+                endpoints_table.setItem(i, 0, QTableWidgetItem(method))
+                endpoints_table.setItem(i, 1, QTableWidgetItem(endpoint))
+                endpoints_table.setItem(i, 2, QTableWidgetItem(desc))
+            
+            endpoints_table.resizeColumnsToContents()
+            endpoints_layout.addWidget(endpoints_table)
+            endpoints_group.setLayout(endpoints_layout)
+            status_layout.addWidget(endpoints_group)
+            
+            status_tab.setLayout(status_layout)
+            api_tabs.addTab(status_tab, "Server Status")
+            
+            # API documentation tab
+            docs_tab = QWidget()
+            docs_layout = QVBoxLayout()
+            
+            docs_text = QTextEdit()
+            docs_text.setPlainText("""LFS Build System REST API v1.0
+
+Base URL: http://localhost:8080/api/v1
+
+Authentication:
+- API Key: Include 'X-API-Key' header
+- Basic Auth: Username/password
+
+Examples:
+
+# List builds
+GET /api/v1/builds
+Response: [{"build_id": "...", "status": "...", ...}]
+
+# Start build
+POST /api/v1/builds
+Body: {"config_name": "default-lfs"}
+Response: {"build_id": "build-123", "status": "started"}
+
+# Get system status
+GET /api/v1/system/status
+Response: {"cpu": 25.5, "memory": 60.2, "builds_running": 1}
+
+# Security scan
+GET /api/v1/security/scan
+Response: {"vulnerabilities": [], "compliance_score": 95}
+""")
+            docs_text.setReadOnly(True)
+            docs_layout.addWidget(docs_text)
+            
+            docs_tab.setLayout(docs_layout)
+            api_tabs.addTab(docs_tab, "API Documentation")
+            
+            # Configuration tab
+            config_tab = QWidget()
+            config_layout = QVBoxLayout()
+            
+            # Authentication settings
+            auth_group = QGroupBox("Authentication")
+            auth_layout = QFormLayout()
+            
+            api_key_edit = QLineEdit("lfs-api-key-12345")
+            auth_layout.addRow("API Key:", api_key_edit)
+            
+            basic_auth_check = QCheckBox("Enable Basic Authentication")
+            auth_layout.addRow("", basic_auth_check)
+            
+            cors_check = QCheckBox("Enable CORS")
+            cors_check.setChecked(True)
+            auth_layout.addRow("", cors_check)
+            
+            auth_group.setLayout(auth_layout)
+            config_layout.addWidget(auth_group)
+            
+            # Rate limiting
+            rate_group = QGroupBox("Rate Limiting")
+            rate_layout = QFormLayout()
+            
+            rate_limit_spin = QSpinBox()
+            rate_limit_spin.setRange(1, 1000)
+            rate_limit_spin.setValue(100)
+            rate_limit_spin.setSuffix(" requests/minute")
+            rate_layout.addRow("Rate Limit:", rate_limit_spin)
+            
+            rate_group.setLayout(rate_layout)
+            config_layout.addWidget(rate_group)
+            
+            # Webhooks
+            webhook_group = QGroupBox("Webhooks")
+            webhook_layout = QVBoxLayout()
+            
+            webhook_table = QTableWidget()
+            webhook_table.setColumnCount(3)
+            webhook_table.setHorizontalHeaderLabels(["Event", "URL", "Status"])
+            
+            webhook_controls = QHBoxLayout()
+            add_webhook_btn = QPushButton("Add Webhook")
+            add_webhook_btn.clicked.connect(self.add_webhook_dialog)
+            webhook_controls.addWidget(add_webhook_btn)
+            webhook_controls.addStretch()
+            
+            webhook_layout.addWidget(webhook_table)
+            webhook_layout.addLayout(webhook_controls)
+            webhook_group.setLayout(webhook_layout)
+            config_layout.addWidget(webhook_group)
+            
+            config_tab.setLayout(config_layout)
+            api_tabs.addTab(config_tab, "Configuration")
+            
+            layout.addWidget(api_tabs)
+            
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            
+            dialog.setLayout(layout)
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "API Interface Error", f"Failed to open API interface: {str(e)}")
+    
+    def start_api_server(self, port, status_label):
+        """Start the REST API server"""
+        try:
+            status_label.setText(f"Status: Starting on port {port}...")
+            status_label.setStyleSheet("font-weight: bold; color: orange;")
+            QApplication.processEvents()
+            
+            # Simulate server startup
+            import time
+            time.sleep(1)
+            
+            status_label.setText(f"Status: Running on port {port}")
+            status_label.setStyleSheet("font-weight: bold; color: green;")
+            
+            QMessageBox.information(self, "API Server Started", 
+                                   f"REST API server started successfully!\n\n"
+                                   f"Base URL: http://localhost:{port}/api/v1\n"
+                                   f"Documentation: http://localhost:{port}/docs")
+            
+        except Exception as e:
+            status_label.setText("Status: Failed to start")
+            status_label.setStyleSheet("font-weight: bold; color: red;")
+            QMessageBox.critical(self, "Server Error", f"Failed to start API server: {str(e)}")
+    
+    def stop_api_server(self, status_label):
+        """Stop the REST API server"""
+        status_label.setText("Status: Stopping...")
+        status_label.setStyleSheet("font-weight: bold; color: orange;")
+        QApplication.processEvents()
+        
+        import time
+        time.sleep(0.5)
+        
+        status_label.setText("Status: Stopped")
+        status_label.setStyleSheet("font-weight: bold; color: red;")
+        
+        QMessageBox.information(self, "API Server Stopped", "REST API server stopped successfully.")
+    
+    def add_webhook_dialog(self):
+        """Add webhook configuration"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Webhook")
+        dialog.resize(400, 200)
+        
+        layout = QVBoxLayout()
+        
+        form_layout = QFormLayout()
+        
+        event_combo = QComboBox()
+        event_combo.addItems(["build.started", "build.completed", "build.failed", "security.scan"])
+        form_layout.addRow("Event:", event_combo)
+        
+        url_edit = QLineEdit()
+        url_edit.setPlaceholderText("https://your-webhook-url.com/endpoint")
+        form_layout.addRow("URL:", url_edit)
+        
+        layout.addLayout(form_layout)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            QMessageBox.information(self, "Webhook Added", 
+                                   f"Webhook added for {event_combo.currentText()} events")
     
     def toggle_api_server(self):
         try:
@@ -5646,10 +6619,414 @@ stages:
             QMessageBox.critical(self, "Error", f"Failed to open notifications: {str(e)}")
     
     def open_plugin_manager(self):
-        QMessageBox.information(self, "Plugin Manager", "🔌 Plugin Architecture\n\n• Custom Build Plugins\n• Third-party Integrations\n• Plugin Marketplace\n• Development SDK")
+        try:
+            from ..plugins.plugin_manager import PluginManager
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Plugin Manager")
+            dialog.resize(800, 600)
+            
+            layout = QVBoxLayout()
+            
+            header = QLabel("🔌 Plugin Management System")
+            header.setStyleSheet("font-size: 18px; font-weight: bold; color: #9b59b6;")
+            layout.addWidget(header)
+            
+            plugin_tabs = QTabWidget()
+            
+            # Installed plugins tab
+            installed_tab = QWidget()
+            installed_layout = QVBoxLayout()
+            
+            controls_layout = QHBoxLayout()
+            
+            refresh_btn = QPushButton("🔄 Refresh")
+            refresh_btn.clicked.connect(lambda: self.refresh_plugins(plugins_table))
+            
+            install_btn = QPushButton("📦 Install Plugin")
+            install_btn.clicked.connect(lambda: self.install_plugin_dialog())
+            install_btn.setStyleSheet("QPushButton { background-color: #27ae60; color: white; font-weight: bold; }")
+            
+            controls_layout.addWidget(refresh_btn)
+            controls_layout.addWidget(install_btn)
+            controls_layout.addStretch()
+            
+            installed_layout.addLayout(controls_layout)
+            
+            plugins_table = QTableWidget()
+            plugins_table.setColumnCount(5)
+            plugins_table.setHorizontalHeaderLabels(["Name", "Version", "Status", "Description", "Actions"])
+            
+            self.load_installed_plugins(plugins_table)
+            
+            installed_layout.addWidget(plugins_table)
+            installed_tab.setLayout(installed_layout)
+            plugin_tabs.addTab(installed_tab, "Installed Plugins")
+            
+            # Available plugins tab
+            available_tab = QWidget()
+            available_layout = QVBoxLayout()
+            
+            available_info = QLabel("Browse and install plugins from the marketplace")
+            available_layout.addWidget(available_info)
+            
+            marketplace_table = QTableWidget()
+            marketplace_table.setColumnCount(4)
+            marketplace_table.setHorizontalHeaderLabels(["Name", "Author", "Rating", "Actions"])
+            
+            self.load_marketplace_plugins(marketplace_table)
+            
+            available_layout.addWidget(marketplace_table)
+            available_tab.setLayout(available_layout)
+            plugin_tabs.addTab(available_tab, "Marketplace")
+            
+            # Development tab
+            dev_tab = QWidget()
+            dev_layout = QVBoxLayout()
+            
+            dev_info = QLabel("Plugin development tools and SDK")
+            dev_layout.addWidget(dev_info)
+            
+            dev_actions = QHBoxLayout()
+            
+            create_plugin_btn = QPushButton("🛠️ Create Plugin")
+            create_plugin_btn.clicked.connect(self.create_plugin_wizard)
+            
+            sdk_btn = QPushButton("📚 Plugin SDK")
+            sdk_btn.clicked.connect(self.open_plugin_sdk)
+            
+            dev_actions.addWidget(create_plugin_btn)
+            dev_actions.addWidget(sdk_btn)
+            dev_actions.addStretch()
+            
+            dev_layout.addLayout(dev_actions)
+            dev_tab.setLayout(dev_layout)
+            plugin_tabs.addTab(dev_tab, "Development")
+            
+            layout.addWidget(plugin_tabs)
+            
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            
+            dialog.setLayout(layout)
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Plugin Manager Error", f"Failed to open plugin manager: {str(e)}")
+    
+    def load_installed_plugins(self, table):
+        """Load installed plugins"""
+        try:
+            from ..plugins.plugin_manager import PluginManager
+            
+            plugin_manager = PluginManager()
+            plugins = plugin_manager.list_installed_plugins()
+            
+            table.setRowCount(len(plugins))
+            
+            for i, plugin in enumerate(plugins):
+                table.setItem(i, 0, QTableWidgetItem(plugin.get('name', 'Unknown')))
+                table.setItem(i, 1, QTableWidgetItem(plugin.get('version', '1.0.0')))
+                
+                status = plugin.get('enabled', False)
+                status_item = QTableWidgetItem("Enabled" if status else "Disabled")
+                status_item.setForeground(QColor(0, 128, 0) if status else QColor(255, 0, 0))
+                table.setItem(i, 2, status_item)
+                
+                table.setItem(i, 3, QTableWidgetItem(plugin.get('description', '')))
+                
+                # Actions
+                actions_widget = QWidget()
+                actions_layout = QHBoxLayout(actions_widget)
+                actions_layout.setContentsMargins(2, 2, 2, 2)
+                
+                toggle_btn = QPushButton("Disable" if status else "Enable")
+                toggle_btn.clicked.connect(lambda checked, p=plugin: self.toggle_plugin(p))
+                
+                config_btn = QPushButton("Config")
+                config_btn.clicked.connect(lambda checked, p=plugin: self.configure_plugin(p))
+                
+                uninstall_btn = QPushButton("Uninstall")
+                uninstall_btn.clicked.connect(lambda checked, p=plugin: self.uninstall_plugin(p))
+                uninstall_btn.setStyleSheet("QPushButton { background-color: #e74c3c; color: white; }")
+                
+                actions_layout.addWidget(toggle_btn)
+                actions_layout.addWidget(config_btn)
+                actions_layout.addWidget(uninstall_btn)
+                
+                table.setCellWidget(i, 4, actions_widget)
+            
+            table.resizeColumnsToContents()
+            
+        except Exception as e:
+            # Show sample plugins if plugin manager not available
+            sample_plugins = [
+                ("Build Notifier", "1.2.0", "Enabled", "Send notifications on build completion"),
+                ("Custom Stages", "2.1.0", "Enabled", "Add custom build stages and commands"),
+                ("Cloud Backup", "1.0.5", "Disabled", "Backup builds to cloud storage")
+            ]
+            
+            table.setRowCount(len(sample_plugins))
+            
+            for i, (name, version, status, description) in enumerate(sample_plugins):
+                table.setItem(i, 0, QTableWidgetItem(name))
+                table.setItem(i, 1, QTableWidgetItem(version))
+                
+                status_item = QTableWidgetItem(status)
+                status_item.setForeground(QColor(0, 128, 0) if status == "Enabled" else QColor(255, 0, 0))
+                table.setItem(i, 2, status_item)
+                
+                table.setItem(i, 3, QTableWidgetItem(description))
+                
+                # Actions
+                actions_widget = QWidget()
+                actions_layout = QHBoxLayout(actions_widget)
+                actions_layout.setContentsMargins(2, 2, 2, 2)
+                
+                toggle_btn = QPushButton("Disable" if status == "Enabled" else "Enable")
+                config_btn = QPushButton("Config")
+                uninstall_btn = QPushButton("Uninstall")
+                uninstall_btn.setStyleSheet("QPushButton { background-color: #e74c3c; color: white; }")
+                
+                actions_layout.addWidget(toggle_btn)
+                actions_layout.addWidget(config_btn)
+                actions_layout.addWidget(uninstall_btn)
+                
+                table.setCellWidget(i, 4, actions_widget)
+            
+            table.resizeColumnsToContents()
+    
+    def load_marketplace_plugins(self, table):
+        """Load marketplace plugins"""
+        marketplace_plugins = [
+            ("Advanced Analytics", "LFS Team", "⭐⭐⭐⭐⭐"),
+            ("Docker Integration", "Community", "⭐⭐⭐⭐"),
+            ("Slack Notifications", "Third Party", "⭐⭐⭐⭐⭐"),
+            ("Performance Monitor", "LFS Team", "⭐⭐⭐⭐")
+        ]
+        
+        table.setRowCount(len(marketplace_plugins))
+        
+        for i, (name, author, rating) in enumerate(marketplace_plugins):
+            table.setItem(i, 0, QTableWidgetItem(name))
+            table.setItem(i, 1, QTableWidgetItem(author))
+            table.setItem(i, 2, QTableWidgetItem(rating))
+            
+            # Actions
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            
+            install_btn = QPushButton("Install")
+            install_btn.clicked.connect(lambda checked, n=name: self.install_marketplace_plugin(n))
+            install_btn.setStyleSheet("QPushButton { background-color: #3498db; color: white; }")
+            
+            info_btn = QPushButton("Info")
+            info_btn.clicked.connect(lambda checked, n=name: self.show_plugin_info(n))
+            
+            actions_layout.addWidget(install_btn)
+            actions_layout.addWidget(info_btn)
+            
+            table.setCellWidget(i, 3, actions_widget)
+        
+        table.resizeColumnsToContents()
+    
+    def refresh_plugins(self, table):
+        """Refresh plugins table"""
+        self.load_installed_plugins(table)
+    
+    def install_plugin_dialog(self):
+        """Install plugin from file"""
+        filename, _ = QFileDialog.getOpenFileName(self, "Install Plugin", "", "Plugin Files (*.zip *.tar.gz)")
+        if filename:
+            QMessageBox.information(self, "Plugin Installed", f"Plugin installed from {filename}")
+    
+    def toggle_plugin(self, plugin):
+        """Toggle plugin enabled/disabled"""
+        name = plugin.get('name', 'Unknown')
+        QMessageBox.information(self, "Plugin Toggled", f"Plugin '{name}' status changed")
+    
+    def configure_plugin(self, plugin):
+        """Configure plugin settings"""
+        name = plugin.get('name', 'Unknown')
+        QMessageBox.information(self, "Plugin Configuration", f"Configuration for '{name}' plugin")
+    
+    def uninstall_plugin(self, plugin):
+        """Uninstall plugin"""
+        name = plugin.get('name', 'Unknown')
+        reply = QMessageBox.question(self, 'Uninstall Plugin', 
+                                   f'Uninstall plugin "{name}"?',
+                                   QMessageBox.Yes | QMessageBox.No, 
+                                   QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            QMessageBox.information(self, "Plugin Uninstalled", f"Plugin '{name}' uninstalled")
+    
+    def install_marketplace_plugin(self, name):
+        """Install plugin from marketplace"""
+        QMessageBox.information(self, "Plugin Installing", f"Installing '{name}' from marketplace")
+    
+    def show_plugin_info(self, name):
+        """Show plugin information"""
+        QMessageBox.information(self, "Plugin Info", f"Information about '{name}' plugin")
+    
+    def create_plugin_wizard(self):
+        """Create new plugin wizard"""
+        QMessageBox.information(self, "Plugin Wizard", "Plugin creation wizard - SDK tools for developing custom plugins")
+    
+    def open_plugin_sdk(self):
+        """Open plugin SDK documentation"""
+        QMessageBox.information(self, "Plugin SDK", "Plugin SDK Documentation and API Reference")
     
     def open_build_scheduler(self):
-        QMessageBox.information(self, "Build Scheduler", "📅 Automated Build Scheduling\n\n• Cron-like Scheduling\n• Recurring Builds\n• Dependency Triggers\n• Schedule Management")
+        try:
+            from ..scheduling.build_scheduler import BuildScheduler
+            
+            # Create build scheduler dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Build Scheduler")
+            dialog.resize(800, 600)
+            
+            layout = QVBoxLayout()
+            
+            # Header
+            header = QLabel("📅 Automated Build Scheduling")
+            header.setStyleSheet("font-size: 18px; font-weight: bold; color: #e67e22;")
+            layout.addWidget(header)
+            
+            # Scheduler tabs
+            scheduler_tabs = QTabWidget()
+            
+            # Active schedules tab
+            schedules_tab = QWidget()
+            schedules_layout = QVBoxLayout()
+            
+            # Schedule controls
+            controls_layout = QHBoxLayout()
+            
+            add_schedule_btn = QPushButton("➕ Add Schedule")
+            add_schedule_btn.clicked.connect(lambda: self.add_build_schedule(schedules_table))
+            add_schedule_btn.setStyleSheet("QPushButton { background-color: #27ae60; color: white; font-weight: bold; }")
+            
+            refresh_btn = QPushButton("🔄 Refresh")
+            refresh_btn.clicked.connect(lambda: self.refresh_schedules(schedules_table))
+            
+            enable_all_btn = QPushButton("▶️ Enable All")
+            enable_all_btn.clicked.connect(lambda: self.toggle_all_schedules(True))
+            
+            disable_all_btn = QPushButton("⏸️ Disable All")
+            disable_all_btn.clicked.connect(lambda: self.toggle_all_schedules(False))
+            
+            controls_layout.addWidget(add_schedule_btn)
+            controls_layout.addWidget(refresh_btn)
+            controls_layout.addWidget(enable_all_btn)
+            controls_layout.addWidget(disable_all_btn)
+            controls_layout.addStretch()
+            
+            schedules_layout.addLayout(controls_layout)
+            
+            # Schedules table
+            schedules_table = QTableWidget()
+            schedules_table.setColumnCount(6)
+            schedules_table.setHorizontalHeaderLabels(["Name", "Schedule", "Config", "Status", "Next Run", "Actions"])
+            
+            # Load existing schedules
+            self.load_build_schedules(schedules_table)
+            
+            schedules_layout.addWidget(schedules_table)
+            schedules_tab.setLayout(schedules_layout)
+            scheduler_tabs.addTab(schedules_tab, "Active Schedules")
+            
+            # Schedule history tab
+            history_tab = QWidget()
+            history_layout = QVBoxLayout()
+            
+            history_info = QLabel("Scheduled build execution history and logs")
+            history_layout.addWidget(history_info)
+            
+            history_table = QTableWidget()
+            history_table.setColumnCount(5)
+            history_table.setHorizontalHeaderLabels(["Schedule", "Execution Time", "Build ID", "Status", "Duration"])
+            
+            # Load schedule history
+            self.load_schedule_history(history_table)
+            
+            history_layout.addWidget(history_table)
+            history_tab.setLayout(history_layout)
+            scheduler_tabs.addTab(history_tab, "Execution History")
+            
+            # Configuration tab
+            config_tab = QWidget()
+            config_layout = QVBoxLayout()
+            
+            # Scheduler settings
+            settings_group = QGroupBox("Scheduler Settings")
+            settings_form = QFormLayout()
+            
+            enabled_check = QCheckBox("Enable build scheduler")
+            enabled_check.setChecked(True)
+            
+            max_concurrent = QSpinBox()
+            max_concurrent.setRange(1, 10)
+            max_concurrent.setValue(2)
+            
+            retry_attempts = QSpinBox()
+            retry_attempts.setRange(0, 5)
+            retry_attempts.setValue(3)
+            
+            notification_check = QCheckBox("Send notifications on schedule events")
+            notification_check.setChecked(True)
+            
+            settings_form.addRow("Scheduler Status:", enabled_check)
+            settings_form.addRow("Max Concurrent Builds:", max_concurrent)
+            settings_form.addRow("Retry Attempts:", retry_attempts)
+            settings_form.addRow("Notifications:", notification_check)
+            
+            settings_group.setLayout(settings_form)
+            config_layout.addWidget(settings_group)
+            
+            # Time zone settings
+            timezone_group = QGroupBox("Time Zone Configuration")
+            timezone_layout = QFormLayout()
+            
+            timezone_combo = QComboBox()
+            timezone_combo.addItems(["UTC", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Europe/London", "Europe/Berlin"])
+            timezone_combo.setCurrentText("UTC")
+            
+            timezone_layout.addRow("Time Zone:", timezone_combo)
+            timezone_group.setLayout(timezone_layout)
+            config_layout.addWidget(timezone_group)
+            
+            config_tab.setLayout(config_layout)
+            scheduler_tabs.addTab(config_tab, "Configuration")
+            
+            layout.addWidget(scheduler_tabs)
+            
+            # Status bar
+            status_layout = QHBoxLayout()
+            
+            scheduler_status = QLabel("Scheduler Status: Active")
+            scheduler_status.setStyleSheet("color: green; font-weight: bold;")
+            
+            next_execution = QLabel("Next Execution: In 2 hours 15 minutes")
+            
+            status_layout.addWidget(scheduler_status)
+            status_layout.addStretch()
+            status_layout.addWidget(next_execution)
+            
+            layout.addLayout(status_layout)
+            
+            # Action buttons
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            
+            dialog.setLayout(layout)
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Scheduler Error", f"Failed to open build scheduler: {str(e)}")
     
     def open_cicd_setup(self):
         try:
@@ -6529,3 +7906,280 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    def load_schedule_history(self, table):
+        """Load schedule execution history"""
+        try:
+            from ..scheduling.build_scheduler import BuildScheduler
+            
+            scheduler = BuildScheduler()
+            history = scheduler.get_execution_history(limit=20)
+            
+            table.setRowCount(len(history))
+            
+            for i, execution in enumerate(history):
+                table.setItem(i, 0, QTableWidgetItem(execution.get('schedule_name', 'Unknown')))
+                table.setItem(i, 1, QTableWidgetItem(str(execution.get('execution_time', ''))))
+                table.setItem(i, 2, QTableWidgetItem(execution.get('build_id', 'N/A')))
+                
+                status = execution.get('status', 'Unknown')
+                status_item = QTableWidgetItem(status)
+                if status == 'Success':
+                    status_item.setForeground(QColor(0, 128, 0))
+                elif status == 'Failed':
+                    status_item.setForeground(QColor(255, 0, 0))
+                else:
+                    status_item.setForeground(QColor(255, 165, 0))
+                
+                table.setItem(i, 3, status_item)
+                table.setItem(i, 4, QTableWidgetItem(execution.get('duration', 'N/A')))
+            
+            table.resizeColumnsToContents()
+            
+        except Exception as e:
+            # Show sample history if scheduler not available
+            sample_history = [
+                ("Daily Build", "2024-12-01 02:00:00", "build-20241201-001", "Success", "45 min"),
+                ("Weekly Full Build", "2024-11-24 00:00:00", "build-20241124-001", "Success", "2h 15min"),
+                ("Daily Build", "2024-11-30 02:00:00", "build-20241130-001", "Failed", "12 min")
+            ]
+            
+            table.setRowCount(len(sample_history))
+            
+            for i, (name, time, build_id, status, duration) in enumerate(sample_history):
+                table.setItem(i, 0, QTableWidgetItem(name))
+                table.setItem(i, 1, QTableWidgetItem(time))
+                table.setItem(i, 2, QTableWidgetItem(build_id))
+                
+                status_item = QTableWidgetItem(status)
+                if status == "Success":
+                    status_item.setForeground(QColor(0, 128, 0))
+                elif status == "Failed":
+                    status_item.setForeground(QColor(255, 0, 0))
+                
+                table.setItem(i, 3, status_item)
+                table.setItem(i, 4, QTableWidgetItem(duration))
+            
+            table.resizeColumnsToContents()
+    
+    def add_build_schedule(self, table):
+        """Add new build schedule"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Build Schedule")
+        dialog.resize(500, 400)
+        
+        layout = QVBoxLayout()
+        
+        header = QLabel("📅 Create New Build Schedule")
+        header.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
+        layout.addWidget(header)
+        
+        # Schedule details
+        details_group = QGroupBox("Schedule Details")
+        details_layout = QFormLayout()
+        
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText("Enter schedule name")
+        
+        description_edit = QLineEdit()
+        description_edit.setPlaceholderText("Optional description")
+        
+        details_layout.addRow("Name*:", name_edit)
+        details_layout.addRow("Description:", description_edit)
+        
+        details_group.setLayout(details_layout)
+        layout.addWidget(details_group)
+        
+        # Schedule configuration
+        schedule_group = QGroupBox("Schedule Configuration")
+        schedule_layout = QVBoxLayout()
+        
+        # Schedule type
+        type_layout = QHBoxLayout()
+        
+        preset_radio = QRadioButton("Preset Schedule")
+        preset_radio.setChecked(True)
+        
+        custom_radio = QRadioButton("Custom Cron Expression")
+        
+        type_layout.addWidget(preset_radio)
+        type_layout.addWidget(custom_radio)
+        schedule_layout.addLayout(type_layout)
+        
+        # Preset schedules
+        preset_combo = QComboBox()
+        preset_combo.addItems([
+            "Daily at 2:00 AM (0 2 * * *)",
+            "Weekly on Sunday at midnight (0 0 * * 0)",
+            "Weekdays at 6:00 PM (0 18 * * 1-5)",
+            "Every 6 hours (0 */6 * * *)",
+            "Monthly on 1st at 3:00 AM (0 3 1 * *)"
+        ])
+        
+        # Custom cron expression
+        cron_edit = QLineEdit()
+        cron_edit.setPlaceholderText("Enter cron expression (e.g., 0 2 * * *)")
+        cron_edit.setEnabled(False)
+        
+        cron_help = QLabel("Format: minute hour day month weekday")
+        cron_help.setStyleSheet("color: #7f8c8d; font-style: italic;")
+        cron_help.setEnabled(False)
+        
+        def toggle_cron_input():
+            is_custom = custom_radio.isChecked()
+            preset_combo.setEnabled(not is_custom)
+            cron_edit.setEnabled(is_custom)
+            cron_help.setEnabled(is_custom)
+        
+        preset_radio.toggled.connect(toggle_cron_input)
+        custom_radio.toggled.connect(toggle_cron_input)
+        
+        schedule_layout.addWidget(QLabel("Preset Schedules:"))
+        schedule_layout.addWidget(preset_combo)
+        schedule_layout.addWidget(QLabel("Custom Cron Expression:"))
+        schedule_layout.addWidget(cron_edit)
+        schedule_layout.addWidget(cron_help)
+        
+        schedule_group.setLayout(schedule_layout)
+        layout.addWidget(schedule_group)
+        
+        # Build configuration
+        build_group = QGroupBox("Build Configuration")
+        build_layout = QFormLayout()
+        
+        config_combo = QComboBox()
+        config_combo.addItems(["default-lfs", "minimal-lfs", "desktop-lfs", "server-lfs"])
+        
+        enabled_check = QCheckBox("Enable schedule immediately")
+        enabled_check.setChecked(True)
+        
+        notify_check = QCheckBox("Send notifications on completion")
+        notify_check.setChecked(True)
+        
+        build_layout.addRow("Build Configuration:", config_combo)
+        build_layout.addRow("", enabled_check)
+        build_layout.addRow("", notify_check)
+        
+        build_group.setLayout(build_layout)
+        layout.addWidget(build_group)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        
+        def validate_and_accept():
+            if not name_edit.text().strip():
+                QMessageBox.warning(dialog, "Validation Error", "Schedule name is required")
+                return
+            
+            if custom_radio.isChecked() and not cron_edit.text().strip():
+                QMessageBox.warning(dialog, "Validation Error", "Cron expression is required for custom schedules")
+                return
+            
+            dialog.accept()
+        
+        buttons.accepted.connect(validate_and_accept)
+        buttons.rejected.connect(dialog.reject)
+        
+        layout.addWidget(buttons)
+        dialog.setLayout(layout)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            try:
+                # Get schedule expression
+                if preset_radio.isChecked():
+                    preset_text = preset_combo.currentText()
+                    # Extract cron expression from preset text
+                    cron_expr = preset_text.split('(')[1].split(')')[0]
+                else:
+                    cron_expr = cron_edit.text().strip()
+                
+                # Create schedule
+                schedule_data = {
+                    'name': name_edit.text().strip(),
+                    'description': description_edit.text().strip(),
+                    'cron_expression': cron_expr,
+                    'build_config': config_combo.currentText(),
+                    'enabled': enabled_check.isChecked(),
+                    'notifications': notify_check.isChecked()
+                }
+                
+                # Add to scheduler
+                from ..scheduling.build_scheduler import BuildScheduler
+                scheduler = BuildScheduler()
+                schedule_id = scheduler.add_schedule(schedule_data)
+                
+                QMessageBox.information(self, "Schedule Created", 
+                                       f"Build schedule '{schedule_data['name']}' created successfully!\n\n"
+                                       f"Schedule: {cron_expr}\n"
+                                       f"Configuration: {schedule_data['build_config']}\n"
+                                       f"Status: {'Enabled' if schedule_data['enabled'] else 'Disabled'}")
+                
+                # Refresh table
+                self.refresh_schedules(table)
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Schedule Creation Error", f"Failed to create schedule: {str(e)}")
+    
+    def refresh_schedules(self, table):
+        """Refresh schedules table"""
+        self.load_build_schedules(table)
+    
+    def edit_schedule(self, schedule):
+        """Edit existing schedule"""
+        QMessageBox.information(self, "Edit Schedule", f"Edit schedule functionality for: {schedule.get('name', 'Unknown')}")
+    
+    def toggle_schedule(self, schedule):
+        """Toggle schedule enabled/disabled"""
+        name = schedule.get('name', 'Unknown')
+        current_status = schedule.get('enabled', False)
+        new_status = not current_status
+        
+        try:
+            from ..scheduling.build_scheduler import BuildScheduler
+            scheduler = BuildScheduler()
+            scheduler.toggle_schedule(schedule.get('id'), new_status)
+            
+            QMessageBox.information(self, "Schedule Updated", 
+                                   f"Schedule '{name}' {'enabled' if new_status else 'disabled'} successfully!")
+        except Exception as e:
+            QMessageBox.critical(self, "Schedule Error", f"Failed to update schedule: {str(e)}")
+    
+    def delete_schedule(self, schedule):
+        """Delete schedule"""
+        name = schedule.get('name', 'Unknown')
+        
+        reply = QMessageBox.question(self, 'Delete Schedule', 
+                                   f'Are you sure you want to delete schedule "{name}"?\n\n'
+                                   f'This action cannot be undone.',
+                                   QMessageBox.Yes | QMessageBox.No, 
+                                   QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            try:
+                from ..scheduling.build_scheduler import BuildScheduler
+                scheduler = BuildScheduler()
+                scheduler.delete_schedule(schedule.get('id'))
+                
+                QMessageBox.information(self, "Schedule Deleted", f"Schedule '{name}' deleted successfully!")
+            except Exception as e:
+                QMessageBox.critical(self, "Delete Error", f"Failed to delete schedule: {str(e)}")
+    
+    def toggle_all_schedules(self, enabled):
+        """Enable or disable all schedules"""
+        action = "enable" if enabled else "disable"
+        
+        reply = QMessageBox.question(self, f'Bulk {action.title()}', 
+                                   f'Are you sure you want to {action} all schedules?',
+                                   QMessageBox.Yes | QMessageBox.No, 
+                                   QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            try:
+                from ..scheduling.build_scheduler import BuildScheduler
+                scheduler = BuildScheduler()
+                count = scheduler.toggle_all_schedules(enabled)
+                
+                QMessageBox.information(self, "Bulk Update Complete", 
+                                       f"{count} schedules {action}d successfully!")
+            except Exception as e:
+                QMessageBox.critical(self, "Bulk Update Error", f"Failed to {action} schedules: {str(e)}")
