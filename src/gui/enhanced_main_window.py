@@ -50,10 +50,23 @@ class EnhancedMainWindow(QMainWindow):
             self.repo_manager = None
         
         self.setup_enhanced_ui()
+        
+        # Setup auto-refresh timer for build monitoring
+        self.auto_refresh_timer = QTimer()
+        self.auto_refresh_timer.timeout.connect(self.refresh_build_logs)
+        
+        # Setup periodic build table refresh
+        self.table_refresh_timer = QTimer()
+        self.table_refresh_timer.timeout.connect(self.refresh_builds)
+        self.table_refresh_timer.start(5000)  # Refresh every 5 seconds
     
     def setup_enhanced_ui(self):
         self.setWindowTitle("LFS Build System - Enterprise Edition")
         self.setGeometry(100, 100, 1400, 900)
+        
+        # Make window resizable with minimize/maximize buttons
+        self.setMinimumSize(800, 600)
+        self.setWindowFlags(Qt.Window | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint)
         
         # Create enhanced menu bar
         self.create_enhanced_menubar()
@@ -87,7 +100,8 @@ class EnhancedMainWindow(QMainWindow):
         
         # Build Menu
         build_menu = menubar.addMenu('🔨 Build')
-        build_menu.addAction('🧙‍♂️ Build Wizard', self.open_build_wizard)
+        build_menu.addAction('🧙♂️ ML Build Wizard', self.open_build_wizard)
+        build_menu.addAction('📝 Standard Build Wizard', self.open_standard_build_wizard)
         build_menu.addAction('📋 Templates', self.open_templates)
         build_menu.addAction('⚡ Parallel Build', self.open_parallel_build)
         build_menu.addAction('🐳 Container Build', self.open_container_build)
@@ -177,11 +191,11 @@ class EnhancedMainWindow(QMainWindow):
     def create_feature_panel(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        
         # Feature Categories
         categories = [
             ("🔨 Build Features", [
-                ("🧙‍♂️ Build Wizard", self.open_build_wizard),
+                ("🧙♂️ ML Build Wizard", self.open_build_wizard),
+                ("📝 Standard Build Wizard", self.open_standard_build_wizard),
                 ("📋 Templates", self.open_templates),
                 ("⚡ Parallel Builds", self.open_parallel_build),
                 ("🐳 Container Builds", self.open_container_build),
@@ -930,6 +944,25 @@ class EnhancedMainWindow(QMainWindow):
     # Feature action methods (real implementations)
     def open_build_wizard(self):
         try:
+            # Try to use ML-optimized build wizard first
+            if hasattr(self, 'db') and self.db:
+                try:
+                    # Check if ML engine is available
+                    from ..ml.ml_engine import MLEngine
+                    from ..ml.optimization.build_wizard import MLBuildWizard
+                    
+                    # Initialize ML engine if not already done
+                    if not hasattr(self, 'ml_engine'):
+                        self.ml_engine = MLEngine(self.db)
+                    
+                    # Open ML-optimized build wizard
+                    ml_wizard = MLBuildWizard(self, self.db, self.ml_engine)
+                    ml_wizard.exec_()
+                    return
+                    
+                except Exception as e:
+                    print(f"ML wizard not available, using standard wizard: {e}")
+            
             from ..templates.template_manager import BuildTemplateManager
             
             # Create simple build wizard dialog
@@ -1033,6 +1066,101 @@ class EnhancedMainWindow(QMainWindow):
                 
         except Exception as e:
             QMessageBox.critical(self, "Wizard Error", f"Failed to open build wizard: {str(e)}")
+    
+    def open_standard_build_wizard(self):
+        """Open the standard (non-ML) build wizard"""
+        try:
+            from ..templates.template_manager import BuildTemplateManager
+            
+            # Create standard build wizard dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Standard Build Configuration Wizard")
+            dialog.resize(600, 500)
+            
+            layout = QVBoxLayout()
+            
+            # Header
+            header = QLabel("📝 Standard LFS Build Configuration Wizard")
+            header.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
+            layout.addWidget(header)
+            
+            # Template selection
+            template_group = QGroupBox("Build Template")
+            template_layout = QVBoxLayout()
+            
+            template_combo = QComboBox()
+            template_combo.addItems(["Minimal LFS", "Desktop LFS", "Server LFS", "Custom Build"])
+            template_layout.addWidget(template_combo)
+            
+            template_group.setLayout(template_layout)
+            layout.addWidget(template_group)
+            
+            # Configuration
+            config_group = QGroupBox("Build Configuration")
+            config_layout = QFormLayout()
+            
+            name_edit = QLineEdit("lfs-standard-build")
+            config_layout.addRow("Build Name:", name_edit)
+            
+            version_combo = QComboBox()
+            version_combo.addItems(["12.4", "12.3", "12.2"])
+            config_layout.addRow("LFS Version:", version_combo)
+            
+            parallel_spin = QSpinBox()
+            parallel_spin.setRange(1, 16)
+            parallel_spin.setValue(2)
+            config_layout.addRow("Parallel Jobs:", parallel_spin)
+            
+            config_group.setLayout(config_layout)
+            layout.addWidget(config_group)
+            
+            # Options
+            options_group = QGroupBox("Build Options")
+            options_layout = QVBoxLayout()
+            
+            auto_start_check = QCheckBox("Start build immediately after configuration")
+            auto_start_check.setChecked(True)
+            options_layout.addWidget(auto_start_check)
+            
+            cleanup_check = QCheckBox("Clean previous build artifacts")
+            cleanup_check.setChecked(True)
+            options_layout.addWidget(cleanup_check)
+            
+            options_group.setLayout(options_layout)
+            layout.addWidget(options_group)
+            
+            # Buttons
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            
+            dialog.setLayout(layout)
+            
+            if dialog.exec_() == QDialog.Accepted:
+                build_name = name_edit.text()
+                template_type = template_combo.currentText()
+                
+                if auto_start_check.isChecked():
+                    # Start the standard build
+                    try:
+                        self.start_wizard_build(build_name, template_type, version_combo.currentText(), parallel_spin.value())
+                        QMessageBox.information(self, "Build Started", 
+                                               f"Standard build '{build_name}' started successfully!\n\n"
+                                               f"Template: {template_type}\n"
+                                               f"Version: {version_combo.currentText()}\n"
+                                               f"Parallel Jobs: {parallel_spin.value()}\n\n"
+                                               f"Monitor progress in the Dashboard and Build Monitor tabs.")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Build Error", f"Failed to start build: {str(e)}")
+                else:
+                    QMessageBox.information(self, "Configuration Saved", 
+                                           f"Standard build configuration '{build_name}' saved successfully!\n\n"
+                                           f"Template: {template_type}\n"
+                                           f"You can start this build from the Build Monitor tab.")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Wizard Error", f"Failed to open standard build wizard: {str(e)}")
     
     def start_wizard_build(self, build_name, template_type, version, parallel_jobs):
         """Start a build from the wizard configuration"""
@@ -5609,12 +5737,33 @@ stages:
                     for proc in build_processes[:5]:  # Show first 5
                         self.logs_text.append(f"  • PID {proc['pid']}: {proc['name']} (runtime: {proc['runtime']})")
                         self.logs_text.append(f"    CPU: {proc['cpu']:.1f}%, Memory: {proc['memory']:.1f}%")
-                        if 'configure' in proc['cmdline']:
-                            self.logs_text.append(f"    🔍 Configure process - checking system compatibility")
-                        elif 'make' in proc['cmdline']:
-                            self.logs_text.append(f"    🔨 Compilation in progress")
-                        elif 'gcc' in proc['cmdline']:
-                            self.logs_text.append(f"    ⚙️ GCC compilation active")
+                        cmdline = proc['cmdline']
+                        if 'configure' in cmdline:
+                            if '--prefix' in cmdline:
+                                self.logs_text.append(f"    🔍 Configure: Setting up build environment")
+                            else:
+                                self.logs_text.append(f"    🔍 Configure: Checking system compatibility")
+                        elif 'make' in cmdline:
+                            if '-j' in cmdline:
+                                self.logs_text.append(f"    🔨 Make: Parallel compilation")
+                            else:
+                                self.logs_text.append(f"    🔨 Make: Sequential compilation")
+                        elif 'gcc' in cmdline or 'g++' in cmdline:
+                            if '.c' in cmdline or '.cpp' in cmdline:
+                                parts = cmdline.split()
+                                source_files = [p for p in parts if p.endswith(('.c', '.cpp', '.cc'))]
+                                if source_files:
+                                    self.logs_text.append(f"    ⚙️ GCC: Compiling {source_files[0]}")
+                                else:
+                                    self.logs_text.append(f"    ⚙️ GCC: Active compilation")
+                            else:
+                                self.logs_text.append(f"    ⚙️ GCC: Linking or preprocessing")
+                        elif 'tar' in cmdline:
+                            self.logs_text.append(f"    📂 Tar: Extracting source archive")
+                        elif 'wget' in cmdline or 'curl' in cmdline:
+                            self.logs_text.append(f"    ⬇️ Download: Fetching source package")
+                        else:
+                            self.logs_text.append(f"    🔧 Process: {proc['name']}")
                     
                     if len(build_processes) > 5:
                         self.logs_text.append(f"  • ... and {len(build_processes) - 5} more processes")
@@ -5782,6 +5931,31 @@ stages:
                             self.logs_text.append(f"⚠️ No new logs for {minutes_since:.0f} minutes - build may be stuck")
                         else:
                             self.logs_text.append(f"✅ Recent activity: {minutes_since:.1f} minutes ago")
+                    
+                    # Show current stage
+                    current_stage = self.db.execute_query(
+                        "SELECT stage_name FROM build_stages WHERE build_id = %s AND status = 'running' ORDER BY stage_order DESC LIMIT 1",
+                        (self.current_monitored_build,), fetch=True
+                    )
+                    if current_stage:
+                        self.logs_text.append(f"🔧 Current Stage: {current_stage[0]['stage_name']}")
+                    
+                    # Show latest command output
+                    latest_content = latest_doc.get('content', '')
+                    if latest_content:
+                        lines = latest_content.strip().split('\n')
+                        for line in lines[-3:]:  # Show last 3 lines
+                            if line.strip() and not line.startswith('['):
+                                if 'gcc' in line.lower() or 'make' in line.lower() or 'configure' in line.lower():
+                                    self.logs_text.append(f"🔨 {line.strip()}")
+                                elif 'error' in line.lower():
+                                    self.logs_text.append(f"❌ {line.strip()}")
+                                elif 'warning' in line.lower():
+                                    self.logs_text.append(f"⚠️ {line.strip()}")
+                                elif line.strip():
+                                    self.logs_text.append(f"📋 {line.strip()}")
+                    else:
+                        self.logs_text.append(f"✅ Recent activity: {minutes_since:.1f} minutes ago")
                     
                     # Show key information from recent logs
                     for doc in reversed(docs[-3:]):  # Show last 3 documents
@@ -8183,3 +8357,97 @@ if __name__ == "__main__":
                                        f"{count} schedules {action}d successfully!")
             except Exception as e:
                 QMessageBox.critical(self, "Bulk Update Error", f"Failed to {action} schedules: {str(e)}")
+    def open_standard_build_wizard(self):
+        """Open the standard (non-ML) build wizard"""
+        try:
+            from ..templates.template_manager import BuildTemplateManager
+            
+            # Create standard build wizard dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Standard Build Configuration Wizard")
+            dialog.resize(600, 500)
+            
+            layout = QVBoxLayout()
+            
+            # Header
+            header = QLabel("📝 Standard LFS Build Configuration Wizard")
+            header.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
+            layout.addWidget(header)
+            
+            # Template selection
+            template_group = QGroupBox("Build Template")
+            template_layout = QVBoxLayout()
+            
+            template_combo = QComboBox()
+            template_combo.addItems(["Minimal LFS", "Desktop LFS", "Server LFS", "Custom Build"])
+            template_layout.addWidget(template_combo)
+            
+            template_group.setLayout(template_layout)
+            layout.addWidget(template_group)
+            
+            # Configuration
+            config_group = QGroupBox("Build Configuration")
+            config_layout = QFormLayout()
+            
+            name_edit = QLineEdit("lfs-standard-build")
+            config_layout.addRow("Build Name:", name_edit)
+            
+            version_combo = QComboBox()
+            version_combo.addItems(["12.4", "12.3", "12.2"])
+            config_layout.addRow("LFS Version:", version_combo)
+            
+            parallel_spin = QSpinBox()
+            parallel_spin.setRange(1, 16)
+            parallel_spin.setValue(2)
+            config_layout.addRow("Parallel Jobs:", parallel_spin)
+            
+            config_group.setLayout(config_layout)
+            layout.addWidget(config_group)
+            
+            # Options
+            options_group = QGroupBox("Build Options")
+            options_layout = QVBoxLayout()
+            
+            auto_start_check = QCheckBox("Start build immediately after configuration")
+            auto_start_check.setChecked(True)
+            options_layout.addWidget(auto_start_check)
+            
+            cleanup_check = QCheckBox("Clean previous build artifacts")
+            cleanup_check.setChecked(True)
+            options_layout.addWidget(cleanup_check)
+            
+            options_group.setLayout(options_layout)
+            layout.addWidget(options_group)
+            
+            # Buttons
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            
+            dialog.setLayout(layout)
+            
+            if dialog.exec_() == QDialog.Accepted:
+                build_name = name_edit.text()
+                template_type = template_combo.currentText()
+                
+                if auto_start_check.isChecked():
+                    # Start the standard build
+                    try:
+                        self.start_wizard_build(build_name, template_type, version_combo.currentText(), parallel_spin.value())
+                        QMessageBox.information(self, "Build Started", 
+                                               f"Standard build '{build_name}' started successfully!\n\n"
+                                               f"Template: {template_type}\n"
+                                               f"Version: {version_combo.currentText()}\n"
+                                               f"Parallel Jobs: {parallel_spin.value()}\n\n"
+                                               f"Monitor progress in the Dashboard and Build Monitor tabs.")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Build Error", f"Failed to start build: {str(e)}")
+                else:
+                    QMessageBox.information(self, "Configuration Saved", 
+                                           f"Standard build configuration '{build_name}' saved successfully!\n\n"
+                                           f"Template: {template_type}\n"
+                                           f"You can start this build from the Build Monitor tab.")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Wizard Error", f"Failed to open standard build wizard: {str(e)}")

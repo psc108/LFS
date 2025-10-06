@@ -29,6 +29,7 @@ CREATE TABLE build_stages (
     status ENUM('pending', 'running', 'completed', 'failed') DEFAULT 'pending',
     start_time TIMESTAMP NULL,
     end_time TIMESTAMP NULL,
+    duration_seconds INT NULL,
     output_log LONGTEXT,
     FOREIGN KEY (build_id) REFERENCES builds(build_id) ON DELETE CASCADE,
     INDEX idx_build_stage (build_id, stage_order)

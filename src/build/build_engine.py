@@ -303,10 +303,11 @@ class BuildEngine:
         try:
             # Modify command to use sudo with password if needed
             command = stage.command
+            env = None  # Initialize env variable
+            
             if self.sudo_password:
                 # Set SUDO_ASKPASS environment variable and use -A flag
                 import tempfile
-                import os
                 
                 # Create a temporary askpass script
                 askpass_script = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh')
@@ -324,8 +325,6 @@ class BuildEngine:
                 
                 # Store askpass script path for cleanup
                 self._current_askpass_script = askpass_script.name
-            else:
-                env = None
             
             # Add timeout and better error handling for stuck processes
             print(f"🚀 Starting stage {stage.name} with command: {command[:100]}...")

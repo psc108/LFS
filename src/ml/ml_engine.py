@@ -71,6 +71,10 @@ class MLEngine:
         
         # Start background retry mechanism
         self._start_background_retry()
+        
+        # Phase 3: Build Optimization
+        from .optimization.build_optimizer import BuildOptimizer
+        self.build_optimizer = BuildOptimizer(db_manager)
     
     def _load_config(self, config_path: Optional[str]) -> Dict:
         """Load ML configuration"""
@@ -643,6 +647,39 @@ class MLEngine:
             except Exception as e:
                 self.logger.error(f"Background retry error: {e}")
                 retry_interval = min(retry_interval * 2, max_interval)
+    
+    def get_build_optimization(self, config_name: str = None) -> Dict:
+        """Phase 3: Get ML-driven build optimization recommendations"""
+        try:
+            if hasattr(self, 'build_optimizer'):
+                return self.build_optimizer.optimize_build_configuration(config_name)
+            else:
+                return {'error': 'Build optimizer not available'}
+        except Exception as e:
+            self.logger.error(f"Build optimization failed: {e}")
+            return {'error': str(e)}
+    
+    def get_parallel_job_recommendation(self) -> Dict:
+        """Phase 3: Get optimal parallel job count recommendation"""
+        try:
+            if hasattr(self, 'build_optimizer'):
+                return self.build_optimizer.recommend_parallel_jobs()
+            else:
+                return {'error': 'Build optimizer not available'}
+        except Exception as e:
+            self.logger.error(f"Parallel job recommendation failed: {e}")
+            return {'error': str(e)}
+    
+    def analyze_build_performance_history(self, days_back: int = 30) -> Dict:
+        """Phase 3: Analyze historical build performance for optimization"""
+        try:
+            if hasattr(self, 'build_optimizer'):
+                return self.build_optimizer.analyze_historical_performance(days_back)
+            else:
+                return {'error': 'Build optimizer not available'}
+        except Exception as e:
+            self.logger.error(f"Performance history analysis failed: {e}")
+            return {'error': str(e)}
     
     def shutdown(self):
         """Shutdown ML engine and cleanup resources"""

@@ -36,7 +36,7 @@ class DatabaseManager:
                             if 'MySQL Root Password:' in line:
                                 root_password = line.split(':', 1)[1].strip()
                                 # Decode HTML entities
-                                root_password = root_password.replace('&quot;', '"').replace('&lt;', '<').replace('&gt;', '>')
+                                root_password = root_password.replace('&quot;', '"').replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
                             elif 'User:' in line and 'lfs_user' in line:
                                 # lfs_user found but no password specified
                                 lfs_password = 'lfs_pass'  # Default from your earlier input
@@ -231,13 +231,30 @@ class DatabaseManager:
             print(f"Failed to update build status: {e}")
             return False
     
-    def add_stage_log(self, build_id: str, stage_name: str, status: str, output: str = ""):
+    def add_stage_log(self, build_id: str, stage_name: str, status: str, output: str = "", duration_seconds: int = None):
         """Add stage log entry"""
         try:
-            result = self.execute_query("""
-                INSERT INTO build_stages (build_id, stage_name, stage_order, status, output_log, start_time)
-                VALUES (%s, %s, 0, %s, %s, NOW())
-            """, (build_id, stage_name, status, output))
+            if status == 'running':
+                # Starting stage - just record start
+                result = self.execute_query("""
+                    INSERT INTO build_stages (build_id, stage_name, stage_order, status, output_log, start_time)
+                    VALUES (%s, %s, 0, %s, %s, NOW())
+                """, (build_id, stage_name, status, output))
+            else:
+                # Completing stage - update with end time and duration
+                result = self.execute_query("""
+                    UPDATE build_stages 
+                    SET status = %s, output_log = %s, end_time = NOW(),
+                        duration_seconds = COALESCE(%s, TIMESTAMPDIFF(SECOND, start_time, NOW()))
+                    WHERE build_id = %s AND stage_name = %s AND status = 'running'
+                """, (status, output, duration_seconds, build_id, stage_name))
+                
+                # If no running stage found, insert new record
+                if result == 0:
+                    result = self.execute_query("""
+                        INSERT INTO build_stages (build_id, stage_name, stage_order, status, output_log, start_time, end_time, duration_seconds)
+                        VALUES (%s, %s, 0, %s, %s, NOW(), NOW(), %s)
+                    """, (build_id, stage_name, status, output, duration_seconds or 0))
             
             return result > 0
             

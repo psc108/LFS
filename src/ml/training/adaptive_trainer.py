@@ -339,11 +339,28 @@ class AdaptiveTrainer:
     def _store_training_results(self, model_name: str, results: Dict):
         """Store training results in database"""
         try:
+            # Ensure system build exists for ML training documents
+            system_build_id = 'ml_system_training'
+            
+            # Check if system build exists, create if not
+            existing = self.db.execute_query(
+                "SELECT build_id FROM builds WHERE build_id = %s", 
+                (system_build_id,), fetch=True
+            )
+            
+            if not existing:
+                # Create system build record
+                self.db.execute_query("""
+                    INSERT INTO builds (build_id, config_name, status, total_stages, completed_stages, start_time)
+                    VALUES (%s, 'ML System Training', 'running', 1, 0, NOW())
+                """, (system_build_id,))
+            
+            # Store training results as document
             self.db.execute_query("""
                 INSERT INTO build_documents (build_id, document_type, title, content, created_at)
-                VALUES (%s, 'ml_training', %s, %s, NOW())
+                VALUES (%s, 'ml_train', %s, %s, NOW())
             """, (
-                'system',
+                system_build_id,
                 f'Adaptive Training - {model_name}',
                 json.dumps(results, default=str)
             ))
