@@ -19,6 +19,7 @@ A native GUI build system for Linux From Scratch with MySQL backend, integrated 
 - **Package Management**: Comprehensive package manager with cache status and pre-download capabilities
 - **Kernel Configuration**: Interactive GUI for configuring Linux kernel build parameters with context-sensitive help, tabbed interface, and .config file support
 - **Build Archiving**: Archive builds while preserving all historical documents and logs
+- **Bulk Archive Operations**: Select and archive multiple completed builds simultaneously with safety checks
 - **System Status Monitoring**: Real-time process monitoring and build activity tracking
 - **Advanced ML System**: Complete machine learning platform with real-time inference, ensemble prediction, and adaptive training
 - **Intelligent Build Prediction**: AI-powered failure prediction with confidence intervals and risk assessment
@@ -483,6 +484,7 @@ stages:
 - **Build Actions Menu**: Organized dropdown menu for all build operations
 - **Kernel Configuration**: Interactive kernel parameter configuration with tabbed interface and help system
 - **Archive Management**: Archive completed builds while preserving all documents for historical reference
+- **Bulk Archive Operations**: Select multiple builds and archive them simultaneously with intelligent safety checks
 - **Build Scheduling**: Automated recurring builds with cron-like scheduling and execution history
 - **Performance Analytics**: Real-time dashboard showing build metrics, success rates, and performance trends
 
@@ -870,6 +872,15 @@ The system automatically handles all Git operations for non-Git users:
 - **Build Comparison**: Compare different build attempts through Git history
 
 ## Changelog
+
+### Version 2.3 - Bulk Archive Operations
+
+- **Bulk Archive Interface**: Added bulk archive controls to dashboard with multi-select table support
+- **Smart Archive Logic**: Only archives completed builds (success, failed, cancelled) with running build protection
+- **Batch Processing**: Efficient bulk operations with individual error tracking and reporting
+- **User-Friendly Confirmation**: Detailed confirmation dialogs showing builds to be archived and skipped
+- **Selection Controls**: Select All and Clear Selection buttons for easy build management
+- **Safety Features**: Prevents archiving running builds and provides clear warnings about skipped builds
 
 ### Version 2.2 - Professional Tools Integration
 

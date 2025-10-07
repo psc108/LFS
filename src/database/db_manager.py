@@ -426,8 +426,35 @@ class DatabaseManager:
             # Tables should already exist from setup_database.sql
             print("✅ Database tables verified")
             
+            # Create solution effectiveness table for ML
+            self.create_solution_effectiveness_table()
+            
         except Exception as e:
             print(f"Failed to verify tables: {e}")
+    
+    def create_solution_effectiveness_table(self):
+        """Create solution effectiveness tracking table for ML learning"""
+        try:
+            self.execute_query("""
+                CREATE TABLE IF NOT EXISTS solution_effectiveness (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    build_id VARCHAR(255) NOT NULL,
+                    error_message TEXT NOT NULL,
+                    solution_data JSON,
+                    effectiveness_rating FLOAT DEFAULT NULL,
+                    applied BOOLEAN DEFAULT FALSE,
+                    success BOOLEAN DEFAULT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX idx_build_id (build_id),
+                    INDEX idx_error_message (error_message(255)),
+                    INDEX idx_effectiveness (effectiveness_rating),
+                    INDEX idx_created_at (created_at)
+                )
+            """)
+            print("✅ Solution effectiveness table created/verified")
+        except Exception as e:
+            print(f"Failed to create solution effectiveness table: {e}")
     
     # Enhanced Data Collection Methods
     

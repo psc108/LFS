@@ -42,6 +42,11 @@ class NextBuildTab(QWidget):
         header_layout.addWidget(QLabel("Search:"))
         header_layout.addWidget(self.search_input)
         
+        # Generate button
+        generate_btn = QPushButton("📊 Generate Report")
+        generate_btn.clicked.connect(self.generate_comprehensive_report)
+        header_layout.addWidget(generate_btn)
+        
         # Refresh button
         refresh_btn = QPushButton("🔄 Refresh")
         refresh_btn.clicked.connect(self.load_reports)
@@ -347,19 +352,72 @@ class NextBuildTab(QWidget):
             delete_action.triggered.connect(self.delete_report)
             menu.addAction(delete_action)
             
+            menu.addSeparator()
+            
+            generate_action = QAction("Generate New Report", self)
+            generate_action.triggered.connect(self.generate_comprehensive_report)
+            menu.addAction(generate_action)
+            
             menu.exec_(self.reports_table.mapToGlobal(position))
     
-    def generate_new_report(self):
-        """Generate a new build analysis report"""
+    def generate_comprehensive_report(self):
+        """Generate comprehensive report analyzing database and ML activity"""
         try:
-            # Generate comprehensive advice which stores report in database
+            from PyQt5.QtWidgets import QProgressDialog
+            from PyQt5.QtCore import Qt
+            
+            progress = QProgressDialog("Generating comprehensive analysis...", "Cancel", 0, 100, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.show()
+            
+            progress.setValue(25)
+            progress.setLabelText("Analyzing build database...")
+            
+            # Generate build analysis
             advice = self.advisor.generate_build_advice()
             
+            progress.setValue(50)
+            progress.setLabelText("Processing ML training data...")
+            
+            # Get ML status and insights
+            try:
+                from ml.ml_engine import MLEngine
+                ml_engine = MLEngine(self.db)
+                ml_status = ml_engine.get_comprehensive_ml_status()
+                training_results = ml_engine.train_models()
+            except Exception as e:
+                ml_status = {'error': str(e)}
+                training_results = {'error': str(e)}
+            
+            progress.setValue(75)
+            progress.setLabelText("Generating recommendations...")
+            
             if 'error' in advice:
+                progress.close()
                 QMessageBox.warning(self, "Error", f"Failed to generate report: {advice['error']}")
-            else:
-                QMessageBox.information(self, "Success", "New build analysis report generated")
-                self.load_reports()
-                
+                return
+            
+            progress.setValue(100)
+            progress.close()
+            
+            # Show summary
+            ml_models = len(ml_status.get('models', {}))
+            trained_models = len(training_results.get('trained_models', []))
+            
+            QMessageBox.information(self, "Report Generated", 
+                f"Comprehensive analysis complete:\n\n"
+                f"• Build History: {advice.get('analysis', {}).get('total_builds', 0)} builds analyzed\n"
+                f"• Success Rate: {advice.get('analysis', {}).get('success_rate', 0):.1f}%\n"
+                f"• ML Models: {ml_models} available, {trained_models} trained\n"
+                f"• Recommendations: {len(advice.get('recommendations', []))} generated")
+            
+            self.load_reports()
+            
         except Exception as e:
+            if 'progress' in locals():
+                progress.close()
             QMessageBox.warning(self, "Error", f"Failed to generate report: {str(e)}")
+    
+    def generate_new_report(self):
+        """Legacy method - redirect to comprehensive report"""
+        self.generate_comprehensive_report()

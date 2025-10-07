@@ -101,7 +101,7 @@ class BuildEngine:
                 {
                     'name': 'build_toolchain',
                     'order': 4,
-                    'command': 'bash scripts/build_toolchain.sh',
+                    'command': 'bash scripts/build_toolchain_optimized.sh',
                     'dependencies': ['download_sources'],
                     'rollback_command': 'rm -rf /mnt/lfs/tools/*'
                 },
@@ -230,6 +230,16 @@ class BuildEngine:
                 f'Stages: {", ".join([s.name for s in self.stages.values()])}',
                 {'build_start': True}
             )
+            
+            # Start ML monitoring for this build
+            try:
+                from ..ml.ml_engine import MLEngine
+                ml_engine = MLEngine(self.db)
+                if ml_engine.is_enabled():
+                    ml_engine.start_build_monitoring(build_id)
+                    print(f"🤖 ML monitoring started for build {build_id}")
+            except Exception as e:
+                print(f"⚠️ ML monitoring failed to start: {e}")
             
             stages_list = sorted(self.stages.values(), key=lambda x: x.order)
             print(f"📅 Executing {len(stages_list)} stages in order: {[s.name for s in stages_list]}")

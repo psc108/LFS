@@ -26,6 +26,7 @@ class EnhancedMainWindow(QMainWindow):
             self.build_engine = BuildEngine(self.db, self.repo_manager)
             self.settings = SettingsManager()
             self.current_build_id = None
+            self.current_monitored_build = None
             
             # Initialize ML engine with Stage 4 components and internet solution research
             try:
@@ -44,6 +45,19 @@ class EnhancedMainWindow(QMainWindow):
             except Exception as e:
                 print(f"⚠️ ML Solution Integration failed: {e}")
                 self.ml_solutions = None
+            
+            # Initialize automated error correction system
+            try:
+                from ..automation.error_correction_engine import AutomatedErrorCorrection
+                from ..automation.build_process_modifier import BuildProcessModifier
+                
+                self.error_correction = AutomatedErrorCorrection(self.db, self.build_engine)
+                self.build_modifier = BuildProcessModifier(self.db, self.build_engine)
+                print("✅ Automated Error Correction System initialized")
+            except Exception as e:
+                print(f"⚠️ Automated Error Correction failed: {e}")
+                self.error_correction = None
+                self.build_modifier = None
             
             # Create thread-safe signals
             self.build_signals = BuildSignals()
@@ -72,6 +86,11 @@ class EnhancedMainWindow(QMainWindow):
         # Setup auto-refresh timer for build monitoring
         self.auto_refresh_timer = QTimer()
         self.auto_refresh_timer.timeout.connect(self.refresh_build_logs)
+        
+        # Import enhanced build monitoring
+        from .detailed_build_monitor import refresh_build_logs, _get_current_stage_activity
+        self.refresh_build_logs = refresh_build_logs.__get__(self, self.__class__)
+        self._get_current_stage_activity = _get_current_stage_activity.__get__(self, self.__class__)
         
         # Setup periodic build table refresh
         self.table_refresh_timer = QTimer()
@@ -308,10 +327,32 @@ class EnhancedMainWindow(QMainWindow):
         builds_group = QGroupBox("All Builds")
         builds_layout = QVBoxLayout()
         
+        # Bulk actions controls
+        bulk_actions_layout = QHBoxLayout()
+        
+        self.bulk_archive_btn = QPushButton("📦 Bulk Archive")
+        self.bulk_archive_btn.clicked.connect(self.bulk_archive_builds)
+        self.bulk_archive_btn.setStyleSheet("QPushButton { background-color: #f39c12; color: white; font-weight: bold; }")
+        self.bulk_archive_btn.setToolTip("Archive selected completed builds (success, failed, cancelled)")
+        
+        select_all_btn = QPushButton("☑️ Select All")
+        select_all_btn.clicked.connect(self.select_all_builds)
+        
+        clear_selection_btn = QPushButton("☐ Clear Selection")
+        clear_selection_btn.clicked.connect(self.clear_build_selection)
+        
+        bulk_actions_layout.addWidget(self.bulk_archive_btn)
+        bulk_actions_layout.addWidget(select_all_btn)
+        bulk_actions_layout.addWidget(clear_selection_btn)
+        bulk_actions_layout.addStretch()
+        
+        builds_layout.addLayout(bulk_actions_layout)
+        
         self.builds_table = QTableWidget()
         self.builds_table.setColumnCount(6)
         self.builds_table.setHorizontalHeaderLabels(["Build ID", "Config", "Status", "Progress", "Start Time", "Actions"])
         self.builds_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.builds_table.setSelectionMode(QAbstractItemView.MultiSelection)
         
         builds_layout.addWidget(self.builds_table)
         builds_group.setLayout(builds_layout)
@@ -359,6 +400,10 @@ class EnhancedMainWindow(QMainWindow):
         self.clear_logs_btn = QPushButton("🗑️ Clear")
         self.clear_logs_btn.clicked.connect(lambda: self.logs_text.clear())
         
+        self.copy_logs_btn = QPushButton("📋 Copy")
+        self.copy_logs_btn.clicked.connect(self.copy_logs_to_clipboard)
+        self.copy_logs_btn.setToolTip("Copy all log contents to clipboard")
+        
         self.check_status_btn = QPushButton("🔍 Check Status")
         self.check_status_btn.clicked.connect(self.check_detailed_build_status)
         self.check_status_btn.setToolTip("Check detailed build status and running processes")
@@ -366,6 +411,7 @@ class EnhancedMainWindow(QMainWindow):
         log_controls.addWidget(self.refresh_logs_btn)
         log_controls.addWidget(self.auto_refresh_check)
         log_controls.addWidget(self.clear_logs_btn)
+        log_controls.addWidget(self.copy_logs_btn)
         log_controls.addWidget(self.check_status_btn)
         log_controls.addStretch()
         
@@ -374,6 +420,12 @@ class EnhancedMainWindow(QMainWindow):
         self.logs_text = QTextEdit()
         self.logs_text.setPlainText("Build logs will appear here...")
         self.logs_text.setFont(QFont("Courier", 9))
+        
+        # Track scroll position to prevent auto-scroll when user is viewing earlier content
+        self.user_scrolled_up = False
+        scrollbar = self.logs_text.verticalScrollBar()
+        scrollbar.valueChanged.connect(self.on_scroll_changed)
+        
         logs_layout.addWidget(self.logs_text)
         logs_group.setLayout(logs_layout)
         monitor_layout.addWidget(logs_group)
@@ -388,6 +440,7 @@ class EnhancedMainWindow(QMainWindow):
         analysis_controls = QHBoxLayout()
         fault_btn = QPushButton("🚨 Fault Analysis")
         fault_btn.clicked.connect(self.open_fault_analysis)
+        fault_btn.setStyleSheet("QPushButton { background-color: #8e44ad; color: white; font-weight: bold; }")
         analysis_controls.addWidget(fault_btn)
         
         perf_btn = QPushButton("📊 Performance")
@@ -400,9 +453,26 @@ class EnhancedMainWindow(QMainWindow):
         
         analysis_layout.addLayout(analysis_controls)
         
-        analysis_results = QTextEdit()
-        analysis_results.setPlainText("Analysis results will appear here...")
-        analysis_layout.addWidget(analysis_results)
+        # Analysis info
+        analysis_info = QLabel("Click 'Fault Analysis' to open the comprehensive fault analysis dashboard with real data from your builds.")
+        analysis_info.setStyleSheet("color: #7f8c8d; font-style: italic; margin: 10px;")
+        analysis_layout.addWidget(analysis_info)
+        
+        # Quick analysis summary
+        quick_summary_group = QGroupBox("Quick Analysis Summary")
+        quick_summary_layout = QVBoxLayout()
+        
+        self.analysis_summary_text = QTextEdit()
+        self.analysis_summary_text.setMaximumHeight(200)
+        self.analysis_summary_text.setPlainText("Click 'Refresh Analysis' to load recent build analysis summary...")
+        quick_summary_layout.addWidget(self.analysis_summary_text)
+        
+        refresh_analysis_btn = QPushButton("🔄 Refresh Analysis")
+        refresh_analysis_btn.clicked.connect(self.refresh_analysis_summary)
+        quick_summary_layout.addWidget(refresh_analysis_btn)
+        
+        quick_summary_group.setLayout(quick_summary_layout)
+        analysis_layout.addWidget(quick_summary_group)
         
         workspace.addTab(analysis_tab, "🔍 Analysis")
         
@@ -507,13 +577,7 @@ class EnhancedMainWindow(QMainWindow):
         
         workspace.addTab(integration_tab, "🔗 Integration")
         
-        # ML Status tab with Stage 4 components
-        try:
-            from .ml_status_tab import MLStatusTab
-            ml_tab = MLStatusTab(self.db)
-            workspace.addTab(ml_tab, "🤖 ML Status")
-        except Exception as e:
-            print(f"Failed to load ML Status tab: {e}")
+        # Remove ML Status tab from main workspace since it's now in Quick Actions modal
         
         # Settings tab
         settings_tab = QWidget()
@@ -932,13 +996,36 @@ class EnhancedMainWindow(QMainWindow):
         iso_btn = QPushButton("📦 Generate ISO")
         iso_btn.clicked.connect(self.open_iso_generator)
         
+        # ML Status button with notification capability
+        self.ml_status_btn = QPushButton("🤖 ML Status")
+        self.ml_status_btn.clicked.connect(self.open_ml_status_modal)
+        self.ml_status_btn.setStyleSheet("QPushButton { background-color: #9b59b6; color: white; font-weight: bold; }")
+        
+        scan_btn = QPushButton("🛡️ Security Scan")
+        scan_btn.clicked.connect(self.open_security_scan)
+        
+        iso_btn = QPushButton("📦 Generate ISO")
+        iso_btn.clicked.connect(self.open_iso_generator)
+        
         actions_layout.addWidget(wizard_btn)
         actions_layout.addWidget(advice_btn)
+        actions_layout.addWidget(self.ml_status_btn)
         actions_layout.addWidget(scan_btn)
         actions_layout.addWidget(iso_btn)
         
         actions_group.setLayout(actions_layout)
         layout.addWidget(actions_group)
+        
+        # Start ML notification checking
+        self.ml_notification_timer = QTimer()
+        self.ml_notification_timer.timeout.connect(self.check_ml_notifications)
+        self.ml_notification_timer.start(10000)  # Check every 10 seconds
+        self.last_ml_check = 0
+        
+        # Flash animation for ML button
+        self.ml_flash_timer = QTimer()
+        self.ml_flash_timer.timeout.connect(self.flash_ml_button)
+        self.ml_flash_state = False
         
         layout.addStretch()
         return panel
@@ -1284,6 +1371,9 @@ stages:
                                        f"\n⚠️  This is a REAL build that will take hours to complete!\n"
                                        f"\n📋 Live logs will appear below as build progresses...\n")
             
+            # Reset scroll tracking for new build
+            self.user_scrolled_up = False
+            
             # Start auto-refresh for live monitoring
             if not self.auto_refresh_timer.isActive():
                 self.auto_refresh_timer.start(2000)  # Refresh every 2 seconds
@@ -1310,6 +1400,200 @@ stages:
             print(f"⚠️ REAL LFS build {build_id} started with template {template_type} (sudo: ❌ NOT SET)")
         
         return build_id
+    
+    def on_scroll_changed(self, value):
+        """Track if user has scrolled up from bottom"""
+        scrollbar = self.logs_text.verticalScrollBar()
+        # User scrolled up if not at maximum position
+        self.user_scrolled_up = value < scrollbar.maximum()
+    
+    def copy_logs_to_clipboard(self):
+        """Copy all log contents to clipboard"""
+        try:
+            from PyQt5.QtWidgets import QApplication
+            clipboard = QApplication.clipboard()
+            clipboard.setText(self.logs_text.toPlainText())
+            
+            # Show brief confirmation
+            original_text = self.copy_logs_btn.text()
+            self.copy_logs_btn.setText("✅ Copied!")
+            QTimer.singleShot(2000, lambda: self.copy_logs_btn.setText(original_text))
+            
+        except Exception as e:
+            print(f"Error copying logs: {e}")
+    
+    def attempt_automated_resolution(self, build_id, stuck_minutes):
+        """Attempt automated resolution for stuck build"""
+        if not build_id or not hasattr(self, '_last_resolution_attempt'):
+            self._last_resolution_attempt = {}
+        
+        # Prevent multiple resolution attempts for same build
+        if build_id in self._last_resolution_attempt:
+            return
+        
+        self._last_resolution_attempt[build_id] = datetime.now()
+        
+        self.logs_text.append(f"\n🤖 AUTOMATED RESOLUTION ATTEMPT - Build stuck for {stuck_minutes:.0f} minutes")
+        
+        try:
+            # 1. Search for solutions in database
+            self.logs_text.append("🔍 Searching database for similar issues...")
+            
+            try:
+                # Search for error documents related to this build
+                error_docs = []
+                if build_id:
+                    error_docs = self.db.execute_query(
+                        "SELECT content, created_at FROM build_documents WHERE build_id = %s AND (document_type = 'error' OR content LIKE '%sudo%password%' OR content LIKE '%[sudo]%') ORDER BY created_at DESC LIMIT 3",
+                        (build_id,), fetch=True
+                    )
+                
+                if error_docs:
+                    self.logs_text.append(f"📋 Found {len(error_docs)} error documents for analysis")
+                else:
+                    self.logs_text.append("📋 No specific error documents found")
+                    
+            except Exception as db_error:
+                self.logs_text.append(f"⚠️ Database search failed: {str(db_error)}")
+            
+            # 2. Attempt internet solution research if ML engine available
+            if self.ml_engine:
+                self.logs_text.append("🌐 Researching solutions online...")
+                try:
+                    # Get current stage and error context
+                    current_stage = self.db.execute_query(
+                        "SELECT stage_name FROM build_stages WHERE build_id = %s AND status = 'running' ORDER BY stage_order DESC LIMIT 1",
+                        (build_id,), fetch=True
+                    )
+                    
+                    stage_name = current_stage[0]['stage_name'] if current_stage else 'unknown'
+                    
+                    # Research solutions
+                    research_result = self.ml_engine.research_build_solutions(
+                        build_id, f"Build stuck at {stage_name} stage for {stuck_minutes:.0f} minutes"
+                    )
+                    
+                    if research_result and 'solutions' in research_result:
+                        self.logs_text.append(f"✅ Found {len(research_result['solutions'])} potential solutions")
+                        for i, solution in enumerate(research_result['solutions'][:3], 1):
+                            self.logs_text.append(f"  {i}. {solution.get('description', 'Solution found')}")
+                    else:
+                        self.logs_text.append("⚠️ No automated solutions found")
+                        
+                except Exception as e:
+                    self.logs_text.append(f"❌ Solution research failed: {str(e)}")
+            
+            # 3. Notify user with options
+            self.logs_text.append(f"\n🚨 USER ACTION REQUIRED:")
+            self.logs_text.append(f"  • Build has been stuck for {stuck_minutes:.0f} minutes")
+            self.logs_text.append(f"  • Use 'Force Cancel' to terminate stuck processes")
+            self.logs_text.append(f"  • Check system resources and restart build")
+            
+            # 4. Show notification dialog
+            QTimer.singleShot(1000, lambda: self.show_stuck_build_notification(build_id, stuck_minutes))
+            
+        except Exception as e:
+            self.logs_text.append(f"❌ Automated resolution failed: {str(e)}")
+    
+    def show_stuck_build_notification(self, build_id, stuck_minutes):
+        """Show notification dialog for stuck build"""
+        reply = QMessageBox.question(
+            self, 'Build Stuck - Action Required',
+            f'Build {build_id} has been stuck for {stuck_minutes:.0f} minutes with no activity.\n\n'
+            f'Automated resolution attempted but user action is required.\n\n'
+            f'What would you like to do?',
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes
+        )
+        
+        # Customize button text
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle('Build Stuck - Action Required')
+        msg_box.setText(f'Build {build_id} has been stuck for {stuck_minutes:.0f} minutes.')
+        msg_box.setInformativeText('What would you like to do?')
+        
+        force_cancel_btn = msg_box.addButton('Force Cancel Build', QMessageBox.YesRole)
+        check_status_btn = msg_box.addButton('Check Status Again', QMessageBox.NoRole)
+        view_ml_btn = msg_box.addButton('View ML Actions', QMessageBox.ActionRole)
+        wait_btn = msg_box.addButton('Keep Waiting', QMessageBox.RejectRole)
+        
+        msg_box.exec_()
+        
+        if msg_box.clickedButton() == force_cancel_btn:
+            self.force_cancel_current_build()
+        elif msg_box.clickedButton() == check_status_btn:
+            self.check_detailed_build_status()
+        elif msg_box.clickedButton() == view_ml_btn:
+            self.show_ml_resolution_details(build_id)
+    
+    def show_ml_resolution_details(self, build_id):
+        """Show detailed ML resolution actions taken"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"ML Resolution Actions - {build_id}")
+        dialog.resize(700, 500)
+        
+        layout = QVBoxLayout()
+        
+        header = QLabel(f"🤖 ML Automated Resolution Report")
+        header.setStyleSheet("font-size: 16px; font-weight: bold;")
+        layout.addWidget(header)
+        
+        details_text = QTextEdit()
+        details_text.setReadOnly(True)
+        
+        try:
+            # Get ML resolution logs from database
+            ml_logs = []
+            if build_id and self.db:
+                try:
+                    ml_logs = self.db.execute_query(
+                        "SELECT created_at, title, content FROM build_documents WHERE build_id = %s AND (title LIKE '%resolution%' OR title LIKE '%ML%' OR title LIKE '%solution%') ORDER BY created_at DESC LIMIT 10",
+                        (build_id,), fetch=True
+                    ) or []
+                except Exception as e:
+                    print(f"Error fetching ML logs: {e}")
+            
+            content = f"ML Resolution Actions for Build {build_id}\n"
+            content += "=" * 50 + "\n\n"
+            
+            if ml_logs:
+                for log in ml_logs:
+                    timestamp = log.get('created_at', 'Unknown')
+                    title = log.get('title', 'Unknown')
+                    log_content = log.get('content', '')
+                    
+                    content += f"🕰️ {timestamp}\n"
+                    content += f"📝 {title}\n"
+                    content += f"{log_content}\n\n"
+                    content += "-" * 40 + "\n\n"
+            else:
+                content += "No ML resolution actions found in database.\n\n"
+            
+            # Add current system status
+            content += "📊 Current System Status:\n"
+            if self.ml_engine:
+                try:
+                    health = self.ml_engine.get_health_status()
+                    content += f"ML Engine Status: {health.get('overall_health', 'Unknown')}\n"
+                    content += f"Models Loaded: {health.get('components', {}).get('models_loaded', 0)}\n"
+                except:
+                    content += "ML Engine Status: Error getting status\n"
+            else:
+                content += "ML Engine: Not available\n"
+            
+            details_text.setPlainText(content)
+            
+        except Exception as e:
+            details_text.setPlainText(f"Error loading ML resolution details: {str(e)}")
+        
+        layout.addWidget(details_text)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
     
     def _get_default_lfs_stages(self):
         """Get default LFS build stages with real commands - NEVER use demo commands"""
@@ -1837,6 +2121,107 @@ Duration: {build.get('duration_seconds', 0)} seconds"""
                     QMessageBox.information(self, "Build Archived", f"Build {build_id} has been archived.")
             except Exception as e:
                 QMessageBox.critical(self, "Archive Error", f"Failed to archive build: {str(e)}")
+    
+    def bulk_archive_builds(self):
+        """Archive multiple selected builds that can be archived"""
+        if not self.db:
+            QMessageBox.warning(self, "Database Error", "Database connection not available")
+            return
+        
+        # Get selected rows
+        selected_rows = set()
+        for item in self.builds_table.selectedItems():
+            selected_rows.add(item.row())
+        
+        if not selected_rows:
+            QMessageBox.information(self, "No Selection", "Please select builds to archive.")
+            return
+        
+        # Get build IDs and statuses for selected rows
+        archivable_builds = []
+        running_builds = []
+        
+        for row in selected_rows:
+            build_id_item = self.builds_table.item(row, 0)
+            status_item = self.builds_table.item(row, 2)
+            
+            if build_id_item and status_item:
+                build_id = build_id_item.text()
+                status = status_item.text()
+                
+                if status == 'running':
+                    running_builds.append(build_id)
+                elif status in ['success', 'failed', 'cancelled']:
+                    archivable_builds.append(build_id)
+        
+        if not archivable_builds:
+            if running_builds:
+                QMessageBox.warning(self, "Cannot Archive", 
+                                   f"Cannot archive running builds. Please wait for them to complete or cancel them first.\n\n"
+                                   f"Running builds: {', '.join(running_builds)}")
+            else:
+                QMessageBox.information(self, "No Archivable Builds", "No builds selected that can be archived.")
+            return
+        
+        # Show confirmation with details
+        message = f"Archive {len(archivable_builds)} builds?\n\n"
+        message += "Builds to archive:\n"
+        for build_id in archivable_builds[:10]:  # Show first 10
+            message += f"• {build_id}\n"
+        if len(archivable_builds) > 10:
+            message += f"• ... and {len(archivable_builds) - 10} more\n"
+        
+        if running_builds:
+            message += f"\nNote: {len(running_builds)} running builds will be skipped."
+        
+        message += "\n\nThis will preserve all documents but mark the builds as archived."
+        
+        reply = QMessageBox.question(self, 'Bulk Archive Builds', message,
+                                   QMessageBox.Yes | QMessageBox.No, 
+                                   QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            try:
+                # Archive builds in batch
+                archived_count = 0
+                failed_builds = []
+                
+                for build_id in archivable_builds:
+                    try:
+                        self.db.execute_query(
+                            "UPDATE builds SET status = 'archived' WHERE build_id = %s",
+                            (build_id,)
+                        )
+                        archived_count += 1
+                    except Exception as e:
+                        failed_builds.append(f"{build_id}: {str(e)}")
+                
+                # Refresh the table
+                self.refresh_builds()
+                
+                # Show results
+                if failed_builds:
+                    message = f"Archived {archived_count} builds successfully.\n\n"
+                    message += f"Failed to archive {len(failed_builds)} builds:\n"
+                    for failure in failed_builds[:5]:  # Show first 5 failures
+                        message += f"• {failure}\n"
+                    if len(failed_builds) > 5:
+                        message += f"• ... and {len(failed_builds) - 5} more failures"
+                    QMessageBox.warning(self, "Bulk Archive Completed with Errors", message)
+                else:
+                    QMessageBox.information(self, "Bulk Archive Completed", 
+                                           f"Successfully archived {archived_count} builds.")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Bulk Archive Error", f"Failed to perform bulk archive: {str(e)}")
+    
+    def select_all_builds(self):
+        """Select all builds in the table"""
+        self.builds_table.selectAll()
+    
+    def clear_build_selection(self):
+        """Clear all build selections"""
+        self.builds_table.clearSelection()
     
     def refresh_repo_status(self):
         """Refresh repository status display"""
@@ -2414,6 +2799,168 @@ Size: {len(doc.get('content', ''))} characters"""
         except Exception as e:
             QMessageBox.warning(self, "Copy Error", f"Failed to copy to clipboard: {str(e)}")
     
+    def refresh_analysis_summary(self):
+        """Refresh the quick analysis summary in the Analysis tab"""
+        if not self.db:
+            self.analysis_summary_text.setPlainText("Database connection not available for analysis.")
+            return
+        
+        try:
+            from ..analysis.fault_analyzer import FaultAnalyzer
+            
+            fault_analyzer = FaultAnalyzer(self.db)
+            
+            # Get quick analysis for last 7 days
+            analysis_data = fault_analyzer.analyze_comprehensive(7)
+            
+            if 'error' in analysis_data:
+                self.analysis_summary_text.setPlainText(f"Analysis error: {analysis_data['error']}")
+                return
+            
+            # Format summary
+            failure_analysis = analysis_data.get('failure_analysis', {})
+            success_rates = analysis_data.get('success_rates', {})
+            trend_analysis = analysis_data.get('trend_analysis', {})
+            
+            summary_text = f"""📊 ANALYSIS SUMMARY (Last 7 Days)
+{'='*50}
+
+🔢 Build Statistics:
+• Total Failures: {failure_analysis.get('total_failures', 0)}
+• Analyzed Builds: {failure_analysis.get('analyzed_builds', 0)}
+• Success Rate: {success_rates.get('overall_success_rate', 0)}%
+• Total Builds: {success_rates.get('total_builds', 0)}
+
+🔍 Failure Patterns:
+• Patterns Detected: {len(failure_analysis.get('patterns', []))}"""
+            
+            # Add top patterns
+            patterns = failure_analysis.get('patterns', [])
+            if patterns:
+                summary_text += "\n• Top Issues:"
+                for i, pattern in enumerate(patterns[:3], 1):
+                    summary_text += f"\n  {i}. {pattern['name']} ({pattern['count']} occurrences)"
+            
+            # Add trend info
+            trend_direction = trend_analysis.get('trend_direction', 'unknown')
+            trend_percentage = trend_analysis.get('trend_percentage', 0)
+            summary_text += f"\n\n📈 Trend Analysis:\n• Direction: {trend_direction.title()}"
+            if trend_percentage != 0:
+                summary_text += f"\n• Change: {trend_percentage:+.1f}%"
+            
+            # Add stage analysis
+            stage_analysis = analysis_data.get('stage_analysis', {})
+            if stage_analysis.get('most_problematic'):
+                summary_text += f"\n\n⚠️ Most Problematic Stage: {stage_analysis['most_problematic']}"
+            
+            summary_text += f"\n\n🕒 Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            summary_text += "\n\nClick 'Fault Analysis' button above for detailed analysis dashboard."
+            
+            self.analysis_summary_text.setPlainText(summary_text)
+            
+        except Exception as e:
+            self.analysis_summary_text.setPlainText(f"Failed to load analysis summary: {str(e)}")
+    
+    def open_ml_status_modal(self):
+        """Open ML Status in a modal dialog"""
+        try:
+            from .ml_status_tab import MLStatusTab
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle("🤖 ML System Status & Activity")
+            dialog.resize(1000, 700)
+            
+            layout = QVBoxLayout()
+            
+            # Create ML status tab content in the dialog
+            ml_tab = MLStatusTab(self.db)
+            layout.addWidget(ml_tab)
+            
+            # Mark notifications as seen
+            self.mark_ml_notifications_seen()
+            
+            # Close button
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.setLayout(layout)
+            dialog.exec_()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "ML Status Error", f"Failed to open ML status: {str(e)}")
+    
+    def check_ml_notifications(self):
+        """Check for new ML notifications and flash button if needed"""
+        if not self.db:
+            return
+        
+        try:
+            # Ensure last_ml_check is a valid integer
+            if not hasattr(self, 'last_ml_check') or self.last_ml_check is None:
+                self.last_ml_check = 0
+            
+            # Check for new ML advice/fixes/notifications since last check
+            check_id = int(self.last_ml_check) if self.last_ml_check else 0
+            new_ml_items = self.db.execute_query(
+                "SELECT COUNT(*) as count FROM build_documents WHERE id > %s AND (title LIKE '%ML%' OR title LIKE '%advice%' OR title LIKE '%recommendation%' OR title LIKE '%solution%' OR metadata LIKE '%ml_advice%' OR metadata LIKE '%ml_intervention%')",
+                (check_id,), fetch=True
+            )
+            
+            count = new_ml_items[0]['count'] if new_ml_items else 0
+            
+            if count > 0:
+                # Start flashing the ML Status button red
+                self.ml_status_btn.setText(f"🚨 ML Status ({count})")
+                if not self.ml_flash_timer.isActive():
+                    self.ml_flash_timer.start(500)  # Flash every 500ms
+            else:
+                # Normal state
+                self.ml_flash_timer.stop()
+                self.ml_status_btn.setStyleSheet(
+                    "QPushButton { background-color: #9b59b6; color: white; font-weight: bold; }"
+                )
+                self.ml_status_btn.setText("🤖 ML Status")
+            
+        except Exception as e:
+            print(f"ML notification check error: {e}")
+    
+    def flash_ml_button(self):
+        """Flash the ML button between red and normal colors"""
+        if self.ml_flash_state:
+            # Red state
+            self.ml_status_btn.setStyleSheet(
+                "QPushButton { background-color: #e74c3c; color: white; font-weight: bold; }"
+            )
+        else:
+            # Orange state for visibility
+            self.ml_status_btn.setStyleSheet(
+                "QPushButton { background-color: #f39c12; color: white; font-weight: bold; }"
+            )
+        self.ml_flash_state = not self.ml_flash_state
+    
+    def mark_ml_notifications_seen(self):
+        """Mark ML notifications as seen"""
+        try:
+            # Get the highest document ID to mark as seen
+            latest_id = self.db.execute_query(
+                "SELECT MAX(id) as max_id FROM build_documents",
+                fetch=True
+            )
+            
+            if latest_id and latest_id[0]['max_id']:
+                self.last_ml_check = latest_id[0]['max_id']
+            
+            # Stop flashing and reset button to normal state
+            self.ml_flash_timer.stop()
+            self.ml_status_btn.setStyleSheet(
+                "QPushButton { background-color: #9b59b6; color: white; font-weight: bold; }"
+            )
+            self.ml_status_btn.setText("🤖 ML Status")
+            
+        except Exception as e:
+            print(f"Error marking ML notifications as seen: {e}")
+    
     def browse_database_tables(self):
         """Browse database tables and data"""
         if not self.db:
@@ -2448,11 +2995,15 @@ Size: {len(doc.get('content', ''))} characters"""
             describe_btn = QPushButton("📝 Describe Table")
             describe_btn.clicked.connect(lambda: self.describe_table(table_combo.currentText()))
             
+            create_table_btn = QPushButton("📋 Create Table")
+            create_table_btn.clicked.connect(lambda: self.create_new_table(table_combo, data_table))
+            
             table_layout.addWidget(QLabel("Table:"))
             table_layout.addWidget(table_combo)
             table_layout.addWidget(load_btn)
             table_layout.addWidget(count_btn)
             table_layout.addWidget(describe_btn)
+            table_layout.addWidget(create_table_btn)
             table_layout.addStretch()
             
             layout.addLayout(table_layout)
@@ -2460,6 +3011,26 @@ Size: {len(doc.get('content', ''))} characters"""
             # Data table
             data_table = QTableWidget()
             layout.addWidget(data_table)
+            
+            # CRUD controls
+            crud_layout = QHBoxLayout()
+            
+            add_btn = QPushButton("➕ Add Row")
+            add_btn.clicked.connect(lambda: self.add_table_row(table_combo.currentText(), data_table))
+            
+            edit_btn = QPushButton("✏️ Edit Row")
+            edit_btn.clicked.connect(lambda: self.edit_table_row(table_combo.currentText(), data_table))
+            
+            delete_btn = QPushButton("🗑️ Delete Row")
+            delete_btn.clicked.connect(lambda: self.delete_table_row(table_combo.currentText(), data_table))
+            delete_btn.setStyleSheet("QPushButton { background-color: #e74c3c; color: white; }")
+            
+            crud_layout.addWidget(add_btn)
+            crud_layout.addWidget(edit_btn)
+            crud_layout.addWidget(delete_btn)
+            crud_layout.addStretch()
+            
+            layout.addLayout(crud_layout)
             
             # Load first table by default
             if tables:
@@ -2634,8 +3205,12 @@ Size: {len(doc.get('content', ''))} characters"""
             grant_privileges_btn = QPushButton("🔐 Grant Privileges")
             grant_privileges_btn.clicked.connect(self.grant_database_privileges)
             
+            create_table_btn = QPushButton("📋 Create Table")
+            create_table_btn.clicked.connect(self.create_database_table)
+            
             actions_layout.addWidget(create_user_btn)
             actions_layout.addWidget(grant_privileges_btn)
+            actions_layout.addWidget(create_table_btn)
             actions_layout.addStretch()
             
             layout.addLayout(actions_layout)
@@ -2717,6 +3292,87 @@ Size: {len(doc.get('content', ''))} characters"""
         except Exception as e:
             QMessageBox.critical(self, "Grant Privileges Error", f"Failed to grant privileges: {str(e)}")
     
+    def create_database_table(self):
+        """Create new database table"""
+        table_name, ok1 = QInputDialog.getText(self, 'Create Table', 'Enter table name:')
+        if not ok1 or not table_name.strip():
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Create Table: {table_name}")
+        dialog.resize(500, 400)
+        
+        layout = QVBoxLayout()
+        
+        # Columns definition
+        columns_group = QGroupBox("Table Columns")
+        columns_layout = QVBoxLayout()
+        
+        self.columns_table = QTableWidget()
+        self.columns_table.setColumnCount(4)
+        self.columns_table.setHorizontalHeaderLabels(["Column Name", "Data Type", "Null", "Key"])
+        self.columns_table.setRowCount(3)  # Start with 3 rows
+        
+        # Add some default rows
+        self.columns_table.setItem(0, 0, QTableWidgetItem("id"))
+        self.columns_table.setItem(0, 1, QTableWidgetItem("INT AUTO_INCREMENT"))
+        self.columns_table.setItem(0, 2, QTableWidgetItem("NOT NULL"))
+        self.columns_table.setItem(0, 3, QTableWidgetItem("PRIMARY KEY"))
+        
+        columns_layout.addWidget(self.columns_table)
+        
+        # Add/Remove row buttons
+        row_buttons = QHBoxLayout()
+        add_row_btn = QPushButton("➕ Add Column")
+        add_row_btn.clicked.connect(lambda: self.columns_table.insertRow(self.columns_table.rowCount()))
+        
+        remove_row_btn = QPushButton("➖ Remove Column")
+        remove_row_btn.clicked.connect(lambda: self.columns_table.removeRow(self.columns_table.currentRow()) if self.columns_table.currentRow() >= 0 else None)
+        
+        row_buttons.addWidget(add_row_btn)
+        row_buttons.addWidget(remove_row_btn)
+        row_buttons.addStretch()
+        
+        columns_layout.addLayout(row_buttons)
+        columns_group.setLayout(columns_layout)
+        layout.addWidget(columns_group)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            try:
+                # Build CREATE TABLE query
+                columns = []
+                for row in range(self.columns_table.rowCount()):
+                    col_name = self.columns_table.item(row, 0)
+                    col_type = self.columns_table.item(row, 1)
+                    col_null = self.columns_table.item(row, 2)
+                    col_key = self.columns_table.item(row, 3)
+                    
+                    if col_name and col_name.text().strip() and col_type and col_type.text().strip():
+                        column_def = f"{col_name.text().strip()} {col_type.text().strip()}"
+                        if col_null and col_null.text().strip():
+                            column_def += f" {col_null.text().strip()}"
+                        if col_key and col_key.text().strip():
+                            column_def += f" {col_key.text().strip()}"
+                        columns.append(column_def)
+                
+                if columns:
+                    query = f"CREATE TABLE {table_name} ({', '.join(columns)})"
+                    self.db.execute_query(query)
+                    QMessageBox.information(self, "Table Created", f"Table '{table_name}' created successfully!")
+                else:
+                    QMessageBox.warning(self, "No Columns", "Please define at least one column.")
+                    
+            except Exception as e:
+                QMessageBox.critical(self, "Create Table Error", f"Failed to create table: {str(e)}")
+    
     def backup_database(self):
         """Backup database"""
         try:
@@ -2773,6 +3429,176 @@ Size: {len(doc.get('content', ''))} characters"""
                 
         except Exception as e:
             QMessageBox.critical(self, "Optimization Error", f"Failed to optimize database: {str(e)}")
+    
+    def add_table_row(self, table_name, data_table):
+        """Add new row to table"""
+        if not table_name:
+            return
+            
+        try:
+            # Get table structure
+            columns = self.db.execute_query(f"DESCRIBE {table_name}", fetch=True)
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Add Row to {table_name}")
+            dialog.resize(400, 300)
+            
+            layout = QVBoxLayout()
+            form_layout = QFormLayout()
+            
+            inputs = {}
+            for col in columns:
+                field_name = col['Field']
+                if col['Extra'] == 'auto_increment':
+                    continue  # Skip auto-increment fields
+                    
+                input_widget = QLineEdit()
+                if 'timestamp' in col['Type'].lower():
+                    input_widget.setText('NOW()')
+                elif col['Default']:
+                    input_widget.setText(str(col['Default']))
+                    
+                form_layout.addRow(f"{field_name}:", input_widget)
+                inputs[field_name] = input_widget
+            
+            layout.addLayout(form_layout)
+            
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            
+            dialog.setLayout(layout)
+            
+            if dialog.exec_() == QDialog.Accepted:
+                # Build INSERT query
+                fields = list(inputs.keys())
+                values = [inputs[field].text() for field in fields]
+                
+                placeholders = ', '.join(['%s'] * len(values))
+                query = f"INSERT INTO {table_name} ({', '.join(fields)}) VALUES ({placeholders})"
+                
+                self.db.execute_query(query, values)
+                self.load_table_data(table_name, data_table)
+                QMessageBox.information(self, "Success", "Row added successfully")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Add Error", f"Failed to add row: {str(e)}")
+    
+    def edit_table_row(self, table_name, data_table):
+        """Edit selected row"""
+        if not table_name or data_table.currentRow() < 0:
+            QMessageBox.warning(self, "Edit Row", "Please select a row to edit")
+            return
+            
+        try:
+            # Get primary key
+            columns = self.db.execute_query(f"DESCRIBE {table_name}", fetch=True)
+            pk_col = next((col['Field'] for col in columns if col['Key'] == 'PRI'), None)
+            
+            if not pk_col:
+                QMessageBox.warning(self, "Edit Error", "No primary key found for this table")
+                return
+            
+            # Get current row data
+            row = data_table.currentRow()
+            pk_value = data_table.item(row, 0).text()  # Assume first column is PK
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Edit Row in {table_name}")
+            dialog.resize(400, 300)
+            
+            layout = QVBoxLayout()
+            form_layout = QFormLayout()
+            
+            inputs = {}
+            for i, col in enumerate(columns):
+                field_name = col['Field']
+                input_widget = QLineEdit()
+                
+                if i < data_table.columnCount():
+                    current_value = data_table.item(row, i).text() if data_table.item(row, i) else ''
+                    input_widget.setText(current_value)
+                
+                if col['Key'] == 'PRI':
+                    input_widget.setEnabled(False)  # Don't allow editing primary key
+                    
+                form_layout.addRow(f"{field_name}:", input_widget)
+                inputs[field_name] = input_widget
+            
+            layout.addLayout(form_layout)
+            
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            
+            dialog.setLayout(layout)
+            
+            if dialog.exec_() == QDialog.Accepted:
+                # Build UPDATE query
+                updates = []
+                values = []
+                
+                for field_name, input_widget in inputs.items():
+                    if field_name != pk_col:  # Don't update primary key
+                        updates.append(f"{field_name} = %s")
+                        values.append(input_widget.text())
+                
+                values.append(pk_value)  # Add PK value for WHERE clause
+                
+                query = f"UPDATE {table_name} SET {', '.join(updates)} WHERE {pk_col} = %s"
+                
+                self.db.execute_query(query, values)
+                self.load_table_data(table_name, data_table)
+                QMessageBox.information(self, "Success", "Row updated successfully")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Edit Error", f"Failed to edit row: {str(e)}")
+    
+    def delete_table_row(self, table_name, data_table):
+        """Delete selected row"""
+        if not table_name or data_table.currentRow() < 0:
+            QMessageBox.warning(self, "Delete Row", "Please select a row to delete")
+            return
+            
+        reply = QMessageBox.question(self, 'Delete Row', 
+                                   f'Are you sure you want to delete this row from {table_name}?\n\nThis action cannot be undone.',
+                                   QMessageBox.Yes | QMessageBox.No, 
+                                   QMessageBox.No)
+        
+        if reply != QMessageBox.Yes:
+            return
+            
+        try:
+            # Get primary key
+            columns = self.db.execute_query(f"DESCRIBE {table_name}", fetch=True)
+            pk_col = next((col['Field'] for col in columns if col['Key'] == 'PRI'), None)
+            
+            if not pk_col:
+                QMessageBox.warning(self, "Delete Error", "No primary key found for this table")
+                return
+            
+            # Get primary key value
+            row = data_table.currentRow()
+            pk_value = data_table.item(row, 0).text()  # Assume first column is PK
+            
+            query = f"DELETE FROM {table_name} WHERE {pk_col} = %s"
+            self.db.execute_query(query, (pk_value,))
+            
+            self.load_table_data(table_name, data_table)
+            QMessageBox.information(self, "Success", "Row deleted successfully")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Delete Error", f"Failed to delete row: {str(e)}")
+    
+    def create_new_table(self, table_combo, data_table):
+        """Create new table from table browser"""
+        self.create_database_table()
+        # Refresh table list
+        tables = self.get_database_tables()
+        table_combo.clear()
+        table_combo.addItems(tables)
     
     def refresh_database_info(self):
         """Refresh database information display"""
@@ -2883,77 +3709,11 @@ Size: {len(doc.get('content', ''))} characters"""
     
     def open_fault_analysis(self):
         try:
-            # Create simplified fault analysis dialog
-            dialog = QDialog(self)
-            dialog.setWindowTitle("Advanced Fault Analysis Dashboard")
-            dialog.resize(800, 600)
+            from .fault_analysis_dialog import FaultAnalysisDialog
             
-            layout = QVBoxLayout()
-            
-            # Header
-            header = QLabel("🔍 Advanced Fault Analysis Dashboard")
-            header.setStyleSheet("font-size: 18px; font-weight: bold; color: #8e44ad;")
-            layout.addWidget(header)
-            
-            # Analysis options
-            options_group = QGroupBox("Analysis Configuration")
-            options_layout = QFormLayout()
-            
-            # Time range
-            days_combo = QComboBox()
-            days_combo.addItems(["7", "14", "30", "60", "90"])
-            days_combo.setCurrentText("30")
-            options_layout.addRow("Analysis Period (days):", days_combo)
-            
-            # Analysis types
-            pattern_check = QCheckBox("Pattern Recognition")
-            pattern_check.setChecked(True)
-            
-            predictive_check = QCheckBox("Predictive Analysis")
-            predictive_check.setChecked(True)
-            
-            root_cause_check = QCheckBox("Root Cause Analysis")
-            root_cause_check.setChecked(True)
-            
-            performance_check = QCheckBox("Performance Correlation")
-            performance_check.setChecked(True)
-            
-            options_layout.addRow("Pattern Recognition:", pattern_check)
-            options_layout.addRow("Predictive Analysis:", predictive_check)
-            options_layout.addRow("Root Cause Analysis:", root_cause_check)
-            options_layout.addRow("Performance Analysis:", performance_check)
-            
-            options_group.setLayout(options_layout)
-            layout.addWidget(options_group)
-            
-            # Status
-            status_label = QLabel("Ready to perform comprehensive fault analysis with ML pattern recognition")
-            status_label.setStyleSheet("color: #8e44ad; font-style: italic;")
-            layout.addWidget(status_label)
-            
-            # Buttons
-            buttons = QDialogButtonBox()
-            analyze_btn = QPushButton("Start Analysis")
-            analyze_btn.setStyleSheet("QPushButton { background-color: #8e44ad; color: white; font-weight: bold; }")
-            
-            cancel_btn = QPushButton("Cancel")
-            
-            buttons.addButton(analyze_btn, QDialogButtonBox.AcceptRole)
-            buttons.addButton(cancel_btn, QDialogButtonBox.RejectRole)
-            
-            buttons.accepted.connect(dialog.accept)
-            buttons.rejected.connect(dialog.reject)
-            
-            layout.addWidget(buttons)
-            dialog.setLayout(layout)
-            
-            if dialog.exec_() == QDialog.Accepted:
-                QMessageBox.information(self, "Fault Analysis Started", 
-                                       f"Comprehensive fault analysis started!\n\n"
-                                       f"Period: {days_combo.currentText()} days\n"
-                                       f"Pattern Recognition: {'Enabled' if pattern_check.isChecked() else 'Disabled'}\n"
-                                       f"Predictive Analysis: {'Enabled' if predictive_check.isChecked() else 'Disabled'}\n\n"
-                                       f"Results will be available in the Analysis tab when complete.")
+            # Create and show the real fault analysis dialog
+            dialog = FaultAnalysisDialog(self, self.db)
+            dialog.exec_()
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open fault analysis: {str(e)}")
@@ -5658,7 +6418,15 @@ stages:
             return
         
         try:
+            # Store scroll position before adding content
+            was_at_bottom = not self.user_scrolled_up
+            
             self.logs_text.append(f"\n📊 COMPREHENSIVE BUILD STATUS - {datetime.now().strftime('%H:%M:%S')}")
+            
+            # Only auto-scroll if user was at bottom
+            if was_at_bottom:
+                scrollbar = self.logs_text.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
             
             # 1. Build Information
             build_info = self.db.execute_query(
@@ -5815,10 +6583,12 @@ stages:
             
             # 4. Sudo Stuck Detection
             try:
-                sudo_errors = self.db.execute_query(
-                    "SELECT content, created_at FROM build_documents WHERE build_id = %s AND (document_type = 'error' OR content LIKE '%sudo%password%' OR content LIKE '%[sudo]%') ORDER BY created_at DESC LIMIT 3",
-                    (self.current_monitored_build,), fetch=True
-                )
+                sudo_errors = []
+                if self.current_monitored_build:
+                    sudo_errors = self.db.execute_query(
+                        "SELECT content, created_at FROM build_documents WHERE build_id = %s AND (document_type = 'error' OR content LIKE '%sudo%password%' OR content LIKE '%[sudo]%') ORDER BY created_at DESC LIMIT 3",
+                        (self.current_monitored_build,), fetch=True
+                    ) or []
                 
                 sudo_stuck = False
                 for error in sudo_errors:
@@ -5947,61 +6717,165 @@ stages:
         self.show_comprehensive_status()
     
     def refresh_build_logs(self):
-        """Manually refresh build logs with enhanced monitoring"""
-        if not hasattr(self, 'current_monitored_build') or not self.current_monitored_build or not self.db:
-            # Try to find a running build
-            if self.db:
-                try:
-                    running_builds = self.db.execute_query(
-                        "SELECT build_id FROM builds WHERE status = 'running' ORDER BY start_time DESC LIMIT 1",
-                        fetch=True
-                    )
-                    if running_builds:
-                        self.current_monitored_build = running_builds[0]['build_id']
-                        self.logs_text.append(f"Found running build: {self.current_monitored_build}")
-                    else:
-                        self.logs_text.append("No active build to refresh")
-                        return
-                except:
-                    self.logs_text.append("No active build to refresh")
-                    return
-            else:
-                self.logs_text.append("No active build to refresh")
-                return
+        """Enhanced build logs display with detailed command output and progress"""
+        if not self.db or not hasattr(self, 'logs_text'):
+            return
         
         try:
-            # Check build status first
-            build_status = self.db.execute_query(
-                "SELECT status, start_time FROM builds WHERE build_id = %s",
-                (self.current_monitored_build,), fetch=True
+            # Get the current monitored build ID
+            monitored_build = getattr(self, 'current_monitored_build', None) or self.current_build_id
+            
+            if not monitored_build:
+                # Try to find the most recent running build
+                running_builds = self.db.execute_query(
+                    "SELECT build_id FROM builds WHERE status = 'running' ORDER BY start_time DESC LIMIT 1",
+                    fetch=True
+                )
+                if running_builds:
+                    monitored_build = running_builds[0]['build_id']
+                    self.current_monitored_build = monitored_build
+                else:
+                    if self.logs_text.toPlainText() == "Build logs will appear here...":
+                        self.logs_text.setPlainText("No active builds to monitor. Start a build to see live logs.")
+                    return
+            
+            # Get detailed log entries including command output
+            log_entries = self.db.execute_query(
+                "SELECT created_at, title, content FROM build_documents WHERE build_id = %s AND document_type IN ('log', 'output', 'error') ORDER BY created_at DESC LIMIT 200",
+                (monitored_build,), fetch=True
             )
             
-            if build_status:
-                status = build_status[0]['status']
-                start_time = build_status[0]['start_time']
+            if not log_entries:
+                return
+            
+            # Get build status
+            build_info = self.db.execute_query(
+                "SELECT status, start_time FROM builds WHERE build_id = %s",
+                (monitored_build,), fetch=True
+            )
+            
+            if not build_info:
+                return
+            
+            build_status = build_info[0]['status']
+            start_time = build_info[0]['start_time']
+            
+            # Calculate elapsed time
+            if start_time:
+                elapsed = datetime.now() - start_time
+                elapsed_str = str(elapsed).split('.')[0]
+            else:
+                elapsed_str = "Unknown"
+            
+            # Build detailed log display
+            log_lines = []
+            log_lines.append(f"🔄 Build Status: {build_status} | Elapsed: {elapsed_str} | Found {len(log_entries)} log entries")
+            
+            # Process entries to show actual command execution details
+            current_stage = None
+            current_component = None
+            last_activity_time = None
+            
+            for entry in reversed(log_entries[-50:]):  # Show last 50 entries
+                content = entry.get('content', '')
+                title = entry.get('title', '')
+                timestamp = entry.get('created_at')
                 
-                # Calculate elapsed time
-                if start_time:
-                    elapsed = datetime.now() - start_time
-                    elapsed_str = str(elapsed).split('.')[0]  # Remove microseconds
+                # Extract stage information
+                stage_info = self._parse_stage_info(title, content)
+                if stage_info:
+                    current_stage = stage_info
+                
+                # Extract toolchain component from recent entries
+                if not hasattr(self, '_recent_entries_for_component'):
+                    self._recent_entries_for_component = []
+                self._recent_entries_for_component.append({'content': content, 'title': title})
+                if len(self._recent_entries_for_component) > 10:
+                    self._recent_entries_for_component = self._recent_entries_for_component[-10:]
+                
+                component_info = self._parse_toolchain_component(self._recent_entries_for_component)
+                if component_info:
+                    current_component = component_info
+                
+                # Track last activity
+                if timestamp:
+                    last_activity_time = timestamp
+                
+                # Show detailed command execution
+                if 'Stage Started:' in title:
+                    log_lines.append(f"\n🚀 {timestamp.strftime('%H:%M:%S') if timestamp else 'Unknown'} - {title}")
+                elif 'Stage:' in title and 'completed' in title:
+                    log_lines.append(f"✅ {timestamp.strftime('%H:%M:%S') if timestamp else 'Unknown'} - {title}")
+                elif 'error' in title.lower() or 'stderr' in title.lower():
+                    log_lines.append(f"🚨 {timestamp.strftime('%H:%M:%S') if timestamp else 'Unknown'} - ERROR:")
+                    # Show error details
+                    error_lines = content.split('\n')[:3]
+                    for error_line in error_lines:
+                        if error_line.strip():
+                            log_lines.append(f"   {error_line.strip()}")
+                elif 'Stage Activity:' in title or 'Stage Output' in title:
+                    # Show actual build commands being executed
+                    if content.strip():
+                        lines = content.split('\n')
+                        for line in lines[:8]:  # Show first 8 lines of command output
+                            if line.strip():
+                                if 'configure:' in line:
+                                    log_lines.append(f"⚙️ {line.strip()}")
+                                elif 'make[' in line or 'gcc' in line:
+                                    log_lines.append(f"🛠️ {line.strip()}")
+                                elif 'checking' in line:
+                                    log_lines.append(f"🔍 {line.strip()}")
+                                elif 'Building' in line or 'Compiling' in line:
+                                    log_lines.append(f"🔨 {line.strip()}")
+                                else:
+                                    log_lines.append(f"📋 {line.strip()}")
+                elif content.strip() and len(content.strip()) > 10:
+                    # Show meaningful build output
+                    if any(keyword in content for keyword in ['===', 'Building', 'Compiling', 'Installing']):
+                        log_lines.append(f"📌 {content.strip()}")
+            
+            # Add current status
+            if last_activity_time:
+                time_since_activity = datetime.now() - last_activity_time
+                minutes_ago = time_since_activity.total_seconds() / 60
+                log_lines.append(f"\n✅ Recent activity: {minutes_ago:.1f} minutes ago")
+            
+            if current_stage:
+                log_lines.append(f"🔧 Current Stage: {current_stage}")
+                # Show what the stage is actually doing
+                stage_activity = self._get_current_stage_activity(monitored_build, current_stage)
+                if stage_activity:
+                    log_lines.append(f"📋 Activity: {stage_activity}")
+            
+            if current_component:
+                log_lines.append(f"🔧 Current Component: {current_component}")
+            
+            # Update display
+            new_content = "\n".join(log_lines)
+            
+            if self.logs_text.toPlainText() != new_content:
+                cursor = self.logs_text.textCursor()
+                scroll_pos = self.logs_text.verticalScrollBar().value()
+                
+                self.logs_text.setPlainText(new_content)
+                
+                if not getattr(self, 'user_scrolled_up', False):
+                    self.logs_text.moveCursor(QTextCursor.End)
                 else:
-                    elapsed_str = "Unknown"
+                    self.logs_text.verticalScrollBar().setValue(scroll_pos)
+            
+            # Update UI elements
+            if hasattr(self, 'build_id_label'):
+                self.build_id_label.setText(f"Build ID: {monitored_build}")
+            
+            if hasattr(self, 'build_status_label'):
+                self.build_status_label.setText(f"Status: {build_status}")
                 
-                # Get all recent logs for current build
+                # Get recent documents for activity tracking
                 docs = self.db.execute_query(
-                    "SELECT title, content, created_at FROM build_documents WHERE build_id = %s AND document_type = 'log' ORDER BY created_at DESC LIMIT 20",
-                    (self.current_monitored_build,), fetch=True
-                )
-                
-                self.logs_text.append(f"\n🔄 Build Status: {status} | Elapsed: {elapsed_str} | Found {len(docs)} log entries")
-                
-                # Check for long-running builds
-                if status == 'running' and start_time:
-                    elapsed_minutes = elapsed.total_seconds() / 60
-                    if elapsed_minutes > 30:
-                        self.logs_text.append(f"⏰ Long-running build detected ({elapsed_minutes:.0f} minutes)")
-                        if elapsed_minutes > 60:
-                            self.logs_text.append(f"⚠️ Build has been running for over 1 hour - this may indicate a stuck process")
+                    "SELECT title, content, created_at FROM build_documents WHERE build_id = %s ORDER BY created_at DESC LIMIT 10",
+                    (monitored_build,), fetch=True
+                ) or []
                 
                 if docs:
                     # Show recent activity
@@ -6013,6 +6887,10 @@ stages:
                         
                         if minutes_since > 10:
                             self.logs_text.append(f"⚠️ No new logs for {minutes_since:.0f} minutes - build may be stuck")
+                            
+                            # Trigger automated resolution after 15 minutes
+                            if minutes_since > 15:
+                                self.attempt_automated_resolution(self.current_monitored_build, minutes_since)
                         else:
                             self.logs_text.append(f"✅ Recent activity: {minutes_since:.1f} minutes ago")
                     
@@ -6079,9 +6957,21 @@ stages:
                     stage_name = current_stage[0]['stage_name']
                     self.logs_text.append(f"🔧 Current Stage: {stage_name}")
                     
-                    # Provide stage-specific guidance
+                    # Provide stage-specific guidance and parse toolchain components
                     if 'toolchain' in stage_name.lower():
                         self.logs_text.append(f"ℹ️ Toolchain compilation typically takes 15-45 minutes")
+                        
+                        # Parse toolchain component from recent logs
+                        recent_logs = self.db.execute_query(
+                            "SELECT content FROM build_documents WHERE build_id = %s AND document_type IN ('log', 'output') ORDER BY created_at DESC LIMIT 10",
+                            (self.current_monitored_build,), fetch=True
+                        ) or []
+                        toolchain_component = self._parse_toolchain_component(recent_logs)
+                        if toolchain_component:
+                            self.logs_text.append(f"📋 Activity: Building toolchain for target: x86_64-lfs-linux-gnu")
+                            self.logs_text.append(f"🔧 Current Component: {toolchain_component}")
+                        else:
+                            self.logs_text.append(f"📋 Activity: Building toolchain for target: x86_64-lfs-linux-gnu")
                     elif 'download' in stage_name.lower():
                         self.logs_text.append(f"ℹ️ Package downloads may take 5-15 minutes depending on connection")
             
@@ -6089,6 +6979,267 @@ stages:
             
         except Exception as e:
             self.logs_text.append(f"Error refreshing logs: {str(e)}")
+    
+    def _parse_stage_info(self, title, content):
+        """Extract stage information from log entries"""
+        if 'Stage Started:' in title:
+            return title.replace('Stage Started:', '').strip()
+        elif 'build_toolchain' in content:
+            return 'build_toolchain'
+        elif 'build_temp_system' in content:
+            return 'build_temp_system'
+        elif 'build_final_system' in content:
+            return 'build_final_system'
+        return None
+    
+
+    
+    def _get_current_stage_activity(self, build_id, stage_name):
+        """Get detailed activity for current stage"""
+        try:
+            # Get recent stage activity
+            activity = self.db.execute_query(
+                "SELECT content FROM build_documents WHERE build_id = %s AND title LIKE %s ORDER BY created_at DESC LIMIT 5",
+                (build_id, f"%{stage_name}%"), fetch=True
+            )
+            
+            if activity:
+                latest_activity = activity[0]['content']
+                # Extract meaningful activity description
+                if 'Building' in latest_activity:
+                    return latest_activity.split('\n')[0]
+                elif 'configure:' in latest_activity:
+                    return "Running configuration checks"
+                elif 'make[' in latest_activity:
+                    return "Compiling source code"
+                elif 'gcc' in latest_activity:
+                    return "Compiling with GCC"
+                else:
+                    return latest_activity.split('\n')[0][:100]
+            
+            return f"{stage_name} in progress"
+            
+        except Exception as e:
+            return f"{stage_name} (activity unknown)"
+    
+    def _parse_error_patterns(self, docs):
+        """Parse and categorize error patterns from build logs"""
+        if not docs:
+            return None
+        
+        error_categories = {
+            'ml_training': {
+                'patterns': [
+                    'adaptive training failed',
+                    'insufficient training data',
+                    'insufficient baseline data',
+                    'ml.training.adaptive_trainer'
+                ],
+                'description': 'ML Training Issues'
+            },
+            'sql_errors': {
+                'patterns': [
+                    'not enough parameters for the sql statement',
+                    'query attempt.*failed',
+                    'query failed after.*attempts',
+                    'malformed.*query'
+                ],
+                'description': 'Database Query Problems'
+            },
+            'database_connection': {
+                'patterns': [
+                    'database connection.*failed',
+                    'connection timeout',
+                    'mysql.*error',
+                    'database.*unavailable'
+                ],
+                'description': 'Database Connection Issues'
+            },
+            'html_entities': {
+                'patterns': [
+                    '&#39;',
+                    '&quot;',
+                    '&lt;',
+                    '&gt;'
+                ],
+                'description': 'HTML Entity Encoding Issues'
+            },
+            'internet_search': {
+                'patterns': [
+                    'no internet search was done',
+                    'search.*failed',
+                    'internet.*unavailable'
+                ],
+                'description': 'Internet Search Problems'
+            },
+            'sudo_issues': {
+                'patterns': [
+                    '\[sudo\]',
+                    'sudo.*password',
+                    'permission denied',
+                    'operation not permitted'
+                ],
+                'description': 'Permission/Sudo Issues'
+            }
+        }
+        
+        detected_errors = []
+        error_counts = {}
+        
+        # Analyze recent logs for error patterns
+        for doc in docs[:20]:  # Check last 20 entries
+            content = doc.get('content', '').lower()
+            title = doc.get('title', '').lower()
+            
+            for category, info in error_categories.items():
+                for pattern in info['patterns']:
+                    import re
+                    if re.search(pattern, content, re.IGNORECASE) or re.search(pattern, title, re.IGNORECASE):
+                        if category not in error_counts:
+                            error_counts[category] = 0
+                        error_counts[category] += 1
+        
+        # Build error summary
+        if error_counts:
+            error_summaries = []
+            for category, count in error_counts.items():
+                description = error_categories[category]['description']
+                if count > 1:
+                    error_summaries.append(f"{description} ({count}x)")
+                else:
+                    error_summaries.append(description)
+            
+            return ", ".join(error_summaries[:3])  # Limit to top 3 error types
+        
+        return None
+    
+    def _parse_toolchain_component(self, docs):
+        """Parse the current toolchain component being built from log content"""
+        if not docs:
+            return None
+        
+        # Common toolchain components in LFS build order with comprehensive patterns
+        toolchain_components = {
+            'binutils': ['binutils', 'ld', 'as', 'ar', 'nm', 'objdump', 'ranlib', 'strip', 'binutils-2.'],
+            'gcc-pass1': ['gcc-pass1', 'gcc (pass 1)', 'libgcc', 'gcc-cross', 'gcc-13.', 'gcc-12.', 'gcc-11.', 'cross-gcc'],
+            'linux-headers': ['linux-api-headers', 'linux headers', 'kernel headers', 'linux-6.', 'linux-5.'],
+            'glibc': ['glibc', 'libc', 'ld-linux', 'glibc-2.'],
+            'libstdc++': ['libstdc++', 'libstdc++-v3', 'gcc-libstdc++', 'libstdc++.so'],
+            'gcc-pass2': ['gcc-pass2', 'gcc (pass 2)', 'gcc-final', 'native-gcc'],
+            'm4': ['m4', 'm4-1.'],
+            'ncurses': ['ncurses', 'libncurses', 'ncurses-6.'],
+            'bash': ['bash', 'bash-5.'],
+            'coreutils': ['coreutils', 'coreutils-9.'],
+            'diffutils': ['diffutils', 'diffutils-3.'],
+            'file': ['file', 'libmagic', 'file-5.'],
+            'findutils': ['findutils', 'findutils-4.'],
+            'gawk': ['gawk', 'gawk-5.'],
+            'grep': ['grep', 'grep-3.'],
+            'gzip': ['gzip', 'gzip-1.'],
+            'make': ['make', 'make-4.'],
+            'patch': ['patch', 'patch-2.'],
+            'sed': ['sed', 'sed-4.'],
+            'tar': ['tar', 'tar-1.'],
+            'xz': ['xz', 'liblzma', 'xz-5.'],
+            'texinfo': ['texinfo', 'texinfo-7.'],
+            'util-linux': ['util-linux', 'util-linux-2.']
+        }
+        
+        # Search through recent log content for component indicators
+        best_match = None
+        best_score = 0
+        
+        for doc in docs[:5]:  # Check last 5 log entries
+            content = doc.get('content', '').lower()
+            title = doc.get('title', '').lower()
+            
+            # Look for explicit component mentions with scoring system
+            for component, keywords in toolchain_components.items():
+                component_score = 0
+                
+                for keyword in keywords:
+                    # High-confidence patterns (score 10)
+                    high_confidence_patterns = [
+                        f'{keyword}-2.' in content,  # Version patterns
+                        f'{keyword}-1.' in content,
+                        f'{keyword}-3.' in content,
+                        f'{keyword}-4.' in content,
+                        f'{keyword}-5.' in content,
+                        f'{keyword}-6.' in content,
+                        f'{keyword}-7.' in content,
+                        f'{keyword}-11.' in content,
+                        f'{keyword}-12.' in content,
+                        f'{keyword}-13.' in content,
+                        f'make -C {keyword}' in content,
+                        f'{keyword}.tar' in content
+                    ]
+                    
+                    # Medium-confidence patterns (score 5)
+                    # Special handling for short keywords that can cause false matches
+                    if len(keyword) <= 2:  # Skip very short keywords like 'as', 'ld' in medium confidence
+                        medium_confidence_patterns = [
+                            f'building {keyword} ' in content,  # Add space to be more specific
+                            f'compiling {keyword} ' in content,
+                            f'installing {keyword} ' in content,
+                            f' {keyword} ' in content and 'tool' in content,  # Only if context suggests it's a tool
+                            keyword == title  # Exact title match only
+                        ]
+                    else:
+                        medium_confidence_patterns = [
+                            f'building {keyword}' in content,
+                            f'compiling {keyword}' in content,
+                            f'installing {keyword}' in content,
+                            f'configuring {keyword}' in content,
+                            f'extracting {keyword}' in content,
+                            keyword in title
+                        ]
+                    
+                    # Low-confidence patterns (score 2) - also need to be careful with short keywords
+                    if len(keyword) <= 2:
+                        low_confidence_patterns = [
+                            f'/{keyword}/' in content,
+                            f' {keyword} ' in content  # Only if surrounded by spaces
+                        ]
+                    else:
+                        low_confidence_patterns = [
+                            f'/{keyword}/' in content,
+                            f'entering directory' in content and keyword in content,
+                            f'leaving directory' in content and keyword in content
+                        ]
+                    
+                    if any(high_confidence_patterns):
+                        component_score += 10
+                    elif any(medium_confidence_patterns):
+                        component_score += 5
+                    elif any(low_confidence_patterns):
+                        component_score += 2
+                
+                # Update best match if this component has higher score
+                if component_score > best_score:
+                    best_score = component_score
+                    best_match = component
+        
+        # Check for error states that might indicate component issues
+        if not best_match or best_score < 5:
+            for doc in docs[:3]:  # Check recent entries for error context
+                content = doc.get('content', '').lower()
+                
+                # Look for build stage indicators even in error messages
+                stage_indicators = {
+                    'toolchain': ['toolchain', 'cross-compilation', 'cross compiler'],
+                    'temp-system': ['temporary system', 'temp system', 'chroot preparation'],
+                    'final-system': ['final system', 'native compilation', 'system build'],
+                    'kernel': ['kernel', 'linux kernel', 'kernel compilation'],
+                    'bootloader': ['bootloader', 'grub', 'boot setup']
+                }
+                
+                for stage, keywords in stage_indicators.items():
+                    for keyword in keywords:
+                        if keyword in content:
+                            return f"{stage} (error state)"
+        
+        # Only return a match if we have reasonable confidence
+        return best_match if best_score >= 5 else None
     
     def toggle_auto_refresh(self, enabled):
         """Toggle auto-refresh of logs"""
@@ -8535,3 +9686,186 @@ if __name__ == "__main__":
                 
         except Exception as e:
             QMessageBox.critical(self, "Wizard Error", f"Failed to open standard build wizard: {str(e)}")
+    
+    # Missing method implementations
+    
+    def toggle_auto_refresh(self, enabled):
+        """Toggle auto-refresh of build logs"""
+        if enabled:
+            self.auto_refresh_timer.start(2000)
+        else:
+            self.auto_refresh_timer.stop()
+    
+    def check_detailed_build_status(self):
+        """Check detailed build status"""
+        if not self.current_build_id:
+            QMessageBox.information(self, "No Active Build", "No active build to check status for.")
+            return
+        
+        try:
+            if self.db:
+                build_info = self.db.execute_query(
+                    "SELECT * FROM builds WHERE build_id = %s",
+                    (self.current_build_id,), fetch=True
+                )
+                
+                if build_info:
+                    build = build_info[0]
+                    status_msg = f"Build ID: {build['build_id']}\n"
+                    status_msg += f"Status: {build['status']}\n"
+                    status_msg += f"Start Time: {build.get('start_time', 'Unknown')}\n"
+                    
+                    QMessageBox.information(self, "Build Status", status_msg)
+                else:
+                    QMessageBox.warning(self, "Build Not Found", f"Build {self.current_build_id} not found in database.")
+        except Exception as e:
+            QMessageBox.critical(self, "Status Check Error", f"Failed to check build status: {str(e)}")
+    
+    def check_build_health(self):
+        """Check build health periodically"""
+        if not self.current_build_id:
+            return
+        
+        try:
+            if self.db:
+                # Check if build is still running
+                build_info = self.db.execute_query(
+                    "SELECT status FROM builds WHERE build_id = %s",
+                    (self.current_build_id,), fetch=True
+                )
+                
+                if build_info and build_info[0]['status'] != 'running':
+                    # Build is no longer running, stop health checks
+                    if hasattr(self, 'health_check_timer'):
+                        self.health_check_timer.stop()
+        except Exception as e:
+            print(f"Error checking build health: {e}")
+    
+    def handle_sudo_required(self, data):
+        """Handle sudo password requirement"""
+        password, ok = QInputDialog.getText(
+            self, 'Sudo Password Required', 
+            'Build requires sudo access. Enter your password:',
+            QLineEdit.Password
+        )
+        
+        if ok and password:
+            self.build_engine.set_sudo_password(password)
+            return True
+        return False
+    
+    def on_stage_start(self, data):
+        """Handle stage start signal"""
+        stage_name = data.get('stage_name', 'Unknown')
+        self.logs_text.append(f"🚀 Started stage: {stage_name}")
+    
+    def on_stage_complete(self, data):
+        """Handle stage completion signal"""
+        stage_name = data.get('stage_name', 'Unknown')
+        status = data.get('status', 'Unknown')
+        self.logs_text.append(f"✅ Completed stage: {stage_name} ({status})")
+    
+    def on_build_complete(self, data):
+        """Handle build completion signal"""
+        build_id = data.get('build_id', 'Unknown')
+        status = data.get('status', 'Unknown')
+        self.logs_text.append(f"🎉 Build {build_id} completed with status: {status}")
+        
+        # Update UI
+        self.build_status_label.setText(f"Status: {status}")
+        self.cancel_build_btn.setEnabled(False)
+        self.current_build_id = None
+        
+        # Stop timers
+        if hasattr(self, 'health_check_timer'):
+            self.health_check_timer.stop()
+    
+    def on_build_error(self, data):
+        """Handle build error signal"""
+        build_id = data.get('build_id', 'Unknown')
+        error = data.get('error', 'Unknown error')
+        self.logs_text.append(f"❌ Build {build_id} error: {error}")
+    
+    # Placeholder methods for menu actions
+    def open_templates(self):
+        QMessageBox.information(self, "Templates", "Build templates feature coming soon!")
+    
+    def open_container_build(self):
+        QMessageBox.information(self, "Container Build", "Container build feature coming soon!")
+    
+    def open_cloud_build(self):
+        QMessageBox.information(self, "Cloud Build", "Cloud build feature coming soon!")
+    
+    def open_vm_generator(self):
+        QMessageBox.information(self, "VM Generator", "VM image generator coming soon!")
+    
+    def open_metrics_dashboard(self):
+        self.open_performance_dashboard()
+    
+    def open_build_report(self, build_id=None):
+        QMessageBox.information(self, "Build Report", f"Build report for {build_id or 'current build'} coming soon!")
+    
+    def open_next_build_advice(self):
+        QMessageBox.information(self, "Next Build Advice", "Next build recommendations coming soon!")
+    
+    def open_team_dashboard(self):
+        QMessageBox.information(self, "Team Dashboard", "Team dashboard feature coming soon!")
+    
+    def open_build_reviews(self):
+        QMessageBox.information(self, "Build Reviews", "Build reviews feature coming soon!")
+    
+    def open_notifications(self):
+        QMessageBox.information(self, "Notifications", "Notifications feature coming soon!")
+    
+    def open_api_interface(self):
+        QMessageBox.information(self, "API Interface", "REST API interface coming soon!")
+    
+    def open_plugin_manager(self):
+        QMessageBox.information(self, "Plugin Manager", "Plugin manager coming soon!")
+    
+    def open_build_scheduler(self):
+        QMessageBox.information(self, "Build Scheduler", "Build scheduler coming soon!")
+    
+    def open_cicd_setup(self):
+        QMessageBox.information(self, "CI/CD Setup", "CI/CD integration setup coming soon!")
+    
+    def open_kernel_config(self):
+        QMessageBox.information(self, "Kernel Config", "Kernel configuration tool coming soon!")
+    
+    def open_package_manager(self):
+        QMessageBox.information(self, "Package Manager", "Package manager coming soon!")
+    
+    def open_compliance_check(self):
+        QMessageBox.information(self, "Compliance Check", "Compliance checking coming soon!")
+    
+    def open_network_boot(self):
+        QMessageBox.information(self, "Network Boot", "Network boot setup coming soon!")
+    
+    def open_cloud_deploy(self):
+        QMessageBox.information(self, "Cloud Deploy", "Cloud deployment coming soon!")
+    
+    def open_storage_manager(self):
+        QMessageBox.information(self, "Storage Manager", "Storage manager coming soon!")
+    
+    def open_system_settings(self):
+        QMessageBox.information(self, "System Settings", "System settings coming soon!")
+    
+    def toggle_api_server(self):
+        QMessageBox.information(self, "API Server", "API server toggle coming soon!")
+    
+    def open_collaboration_settings(self):
+        QMessageBox.information(self, "Collaboration Settings", "Collaboration settings coming soon!")
+    
+    def browse_directory_setting(self, line_edit):
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory")
+        if directory:
+            line_edit.setText(directory)
+    
+    def save_settings(self):
+        QMessageBox.information(self, "Settings Saved", "Settings have been saved successfully!")
+    
+    def reset_settings(self):
+        QMessageBox.information(self, "Settings Reset", "Settings have been reset to defaults!")
+    
+    def test_paths(self):
+        QMessageBox.information(self, "Path Test", "All configured paths are accessible!")

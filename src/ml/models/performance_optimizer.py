@@ -315,6 +315,10 @@ class PerformanceOptimizer:
             self.logger.error(f"Efficiency calculation failed: {e}")
             return 0.5  # Default moderate efficiency
     
+    def train_model(self) -> Dict:
+        """Train the performance optimizer - interface method for automated training"""
+        return self.train()
+    
     def train(self) -> Dict:
         """Train the performance optimizer"""
         try:

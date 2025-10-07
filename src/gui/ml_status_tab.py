@@ -127,6 +127,30 @@ class MLStatusTab(QWidget):
         self.models_tab.setLayout(models_layout)
         tab_widget.addTab(self.models_tab, "Model Status")
         
+        # Search Activity tab
+        self.search_tab = QWidget()
+        search_layout = QVBoxLayout()
+        
+        search_controls = QHBoxLayout()
+        
+        refresh_search_btn = QPushButton("🔄 Refresh Activity")
+        refresh_search_btn.clicked.connect(self.refresh_search_activity)
+        search_controls.addWidget(refresh_search_btn)
+        
+        clear_search_btn = QPushButton("🗑️ Clear Log")
+        clear_search_btn.clicked.connect(self.clear_search_log)
+        search_controls.addWidget(clear_search_btn)
+        
+        search_controls.addStretch()
+        search_layout.addLayout(search_controls)
+        
+        self.search_text = QTextEdit()
+        self.search_text.setReadOnly(True)
+        search_layout.addWidget(self.search_text)
+        
+        self.search_tab.setLayout(search_layout)
+        tab_widget.addTab(self.search_tab, "Search Activity")
+        
         layout.addWidget(tab_widget)
         
         # Auto-refresh timer
@@ -138,11 +162,24 @@ class MLStatusTab(QWidget):
         
     def init_ml_engine(self):
         try:
-            from ml.ml_engine import MLEngine
+            from ..ml.ml_engine import MLEngine
             self.ml_engine = MLEngine(self.db_manager)
             self.update_status()
+            # Auto-load content for all tabs
+            self.update_system_status()
+            self.refresh_insights()
+            self.run_prediction_test()
+            self.train_models()
+            self.refresh_search_activity()
         except Exception as e:
             self.status_label.setText(f"❌ Error: {e}")
+            # Show error in all tabs
+            error_msg = f"ML Engine initialization failed: {e}"
+            self.system_status_text.setText(error_msg)
+            self.insights_text.setText(error_msg)
+            self.predictions_text.setText(error_msg)
+            self.models_text.setText(error_msg)
+            self.search_text.setText(error_msg)
             
     def update_status(self):
         if not self.ml_engine:
@@ -196,14 +233,22 @@ class MLStatusTab(QWidget):
                 for facility, data in insights.items():
                     output += f"📊 {facility.upper()}\n"
                     if isinstance(data, dict):
-                        health = data.get('health_score', 'N/A')
-                        output += f"   Health: {health}%\n"
+                        health = data.get('health_score')
+                        if health is not None:
+                            if isinstance(health, (int, float)):
+                                output += f"   Health: {health:.1f}%\n"
+                            else:
+                                output += f"   Health: {health}\n"
+                        else:
+                            output += f"   Health: No data available\n"
                         
                         recommendations = data.get('recommendations', [])
                         if recommendations:
                             output += f"   Recommendations: {len(recommendations)}\n"
                             for rec in recommendations[:3]:  # Show first 3
                                 output += f"   • {rec}\n"
+                    elif isinstance(data, (int, float)):
+                        output += f"   Status: {data:.2f}\n"
                     else:
                         output += f"   Status: {data}\n"
                     output += "\n"
@@ -222,14 +267,19 @@ class MLStatusTab(QWidget):
             output = "🎯 ML Prediction Test Results\n"
             output += "=" * 50 + "\n\n"
             
-            # Test failure prediction
-            build_data = {
-                'stage_count': 10,
-                'avg_stage_duration': 300,
-                'system_load': 0.7,
-                'memory_usage': 0.8,
-                'previous_failures': 1
-            }
+            # Get real build data from database
+            recent_build = self.db_manager.execute_query(
+                "SELECT build_id, status FROM builds ORDER BY start_time DESC LIMIT 1",
+                fetch=True
+            )
+            
+            if recent_build:
+                build_id = recent_build[0]['build_id']
+                build_data = self.ml_engine.extract_build_features(build_id)
+                if not build_data:
+                    build_data = {'build_id': build_id, 'no_features': True}
+            else:
+                build_data = {'no_builds': True}
             
             prediction = self.ml_engine.predict_failure_risk(build_data)
             if prediction:
@@ -246,11 +296,12 @@ class MLStatusTab(QWidget):
                 
             output += "\n"
             
-            # Test performance optimization
+            # Get real performance data
+            import psutil
             perf_data = {
-                'build_duration': 7200,
-                'cpu_cores': 4,
-                'parallel_jobs': 2
+                'cpu_cores': psutil.cpu_count(),
+                'memory_total': psutil.virtual_memory().total,
+                'current_load': psutil.getloadavg()[0] if hasattr(psutil, 'getloadavg') else 0.5
             }
             
             optimization = self.ml_engine.optimize_build_config(perf_data)
@@ -268,11 +319,12 @@ class MLStatusTab(QWidget):
                 
             output += "\n"
             
-            # Test anomaly detection
+            # Get real system metrics
+            memory = psutil.virtual_memory()
             metrics = {
-                'cpu_usage': 95,
-                'memory_usage': 90,
-                'disk_io': 600
+                'cpu_usage': psutil.cpu_percent(interval=1),
+                'memory_usage': memory.percent,
+                'available_memory': memory.available
             }
             
             anomalies = self.ml_engine.detect_anomalies(metrics)
@@ -412,3 +464,86 @@ class MLStatusTab(QWidget):
     def update_models(self):
         """Update models tab"""
         self.train_models()
+    
+    def refresh_search_activity(self):
+        """Refresh ML activity log with actual operations"""
+        if not self.ml_engine:
+            self.search_text.setText("ML Engine not available")
+            return
+            
+        try:
+            output = "🔍 ML Activity Log\n"
+            output += "=" * 50 + "\n\n"
+            
+            # Get actual ML training activity
+            try:
+                ml_docs = self.db_manager.execute_query(
+                    "SELECT created_at, title, content FROM build_documents WHERE title LIKE '%ML%' OR title LIKE '%training%' OR title LIKE '%prediction%' ORDER BY created_at DESC LIMIT 15",
+                    fetch=True
+                )
+                
+                if ml_docs:
+                    output += "🤖 ML Training & Prediction Activity:\n"
+                    for doc in ml_docs:
+                        timestamp = doc.get('created_at', 'Unknown')
+                        if hasattr(timestamp, 'strftime'):
+                            timestamp = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                        title = doc.get('title', 'Unknown')
+                        output += f"  {timestamp}: {title}\n"
+                else:
+                    output += "🤖 ML Training & Prediction Activity: No recent activity\n"
+            except Exception as e:
+                output += f"🤖 ML Activity: Error - {str(e)}\n"
+            
+            output += "\n"
+            
+            # Show current ML status
+            try:
+                health = self.ml_engine.get_health_status()
+                output += "📊 Current ML System Status:\n"
+                output += f"  Overall Health: {health.get('overall_health', 'Unknown')}\n"
+                output += f"  Models Loaded: {health.get('components', {}).get('models_loaded', 0)}\n"
+                output += f"  Enabled Models: {', '.join(health.get('enabled_models', []))}\n"
+                
+                # Show recent predictions
+                accuracy = self.ml_engine.get_prediction_accuracy()
+                for key, value in accuracy.items():
+                    if key.endswith('_predictions') and value > 0:
+                        model_name = key.replace('_predictions', '').replace('_', ' ').title()
+                        output += f"  {model_name} Predictions: {value}\n"
+                        
+            except Exception as e:
+                output += f"📊 ML Status: Error - {str(e)}\n"
+            
+            output += "\n"
+            
+            # Show analysis results
+            try:
+                analysis_results = self.db_manager.execute_query(
+                    "SELECT created_at, analysis_type, 'Analysis completed' as result_summary FROM analysis_results ORDER BY created_at DESC LIMIT 10",
+                    fetch=True
+                )
+                
+                if analysis_results:
+                    output += "🔬 Recent Analysis Results:\n"
+                    for result in analysis_results:
+                        timestamp = result.get('created_at', 'Unknown')
+                        if hasattr(timestamp, 'strftime'):
+                            timestamp = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                        analysis_type = result.get('analysis_type', 'Unknown')
+                        summary = result.get('result_summary', 'No summary')
+                        output += f"  {timestamp}: {analysis_type} - {summary[:50]}...\n"
+                else:
+                    output += "🔬 Recent Analysis Results: No recent analysis\n"
+            except Exception as e:
+                output += f"🔬 Analysis Results: Error - {str(e)}\n"
+            
+            self.search_text.setText(output)
+            
+        except Exception as e:
+            self.search_text.setText(f"Error refreshing search activity: {e}")
+    
+    def clear_search_log(self):
+        """Clear the search activity display"""
+        self.search_text.clear()
+        self.search_text.setText("🔍 Search activity log cleared. Click 'Refresh Activity' to reload.")

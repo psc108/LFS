@@ -7,11 +7,31 @@ set -e
 echo "=== LFS Host System Preparation ==="
 
 # Install missing dependencies first (texinfo not available in RHEL 9+)
-echo "Installing required host dependencies..."
-sudo dnf install -y glibc-devel kernel-headers binutils-devel gcc-c++ 2>/dev/null || {
-    echo "⚠ Could not install some packages automatically"
-    echo "Please install manually: sudo dnf install glibc-devel kernel-headers binutils-devel gcc-c++"
-}
+echo "Checking for required host dependencies..."
+
+# Check which packages are missing
+MISSING_PACKAGES=()
+for pkg in glibc-devel kernel-headers gcc-c++; do
+    if ! rpm -q $pkg &>/dev/null; then
+        MISSING_PACKAGES+=("$pkg")
+    fi
+done
+
+if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+    echo "📦 Missing packages detected: ${MISSING_PACKAGES[*]}"
+    echo "🔐 Sudo access available - attempting automatic installation..."
+    
+    if sudo dnf install -y "${MISSING_PACKAGES[@]}" 2>&1; then
+        echo "✅ Successfully installed missing packages: ${MISSING_PACKAGES[*]}"
+        echo "📄 PACKAGE_INSTALL_SUCCESS: Installed ${#MISSING_PACKAGES[@]} packages automatically"
+    else
+        echo "❌ Failed to install some packages automatically"
+        echo "📄 PACKAGE_INSTALL_FAILED: Could not install ${MISSING_PACKAGES[*]}"
+        echo "Please install manually: sudo dnf install ${MISSING_PACKAGES[*]}"
+    fi
+else
+    echo "✅ All required packages are already installed"
+fi
 echo "ℹ Note: makeinfo/texinfo not available in RHEL 9+ - using MAKEINFO=missing (standard LFS approach)"
 
 # Check for required tools - use actual command names, not package names

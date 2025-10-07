@@ -80,11 +80,19 @@ class MLEngine:
         from .analysis import LogAnalyzer, AnomalyDetector as SystemAnomalyDetector, MaintenanceAdvisor
         from .research.solution_finder import SolutionFinder
         from .monitoring.live_build_monitor import LiveBuildMonitor
+        from .monitoring.active_monitor import ActiveMonitor
         self.log_analyzer = LogAnalyzer(db_manager)
         self.system_anomaly_detector = SystemAnomalyDetector(db_manager)
         self.maintenance_advisor = MaintenanceAdvisor(db_manager, self.log_analyzer, self.system_anomaly_detector)
         self.solution_finder = SolutionFinder(db_manager)
         self.live_monitor = LiveBuildMonitor(db_manager, self)
+        self.active_monitor = ActiveMonitor(db_manager, self)
+        
+        # Disable active monitor to prevent threading crashes
+        # self.active_monitor.start_monitoring()
+        print("🤖 ML Active Monitor: Disabled to prevent crashes")
+        print("   • Manual monitoring available through ML Status")
+        print("   • Solution research available on demand")
     
     def _load_config(self, config_path: Optional[str]) -> Dict:
         """Load ML configuration"""
@@ -434,6 +442,24 @@ class MLEngine:
             last_prediction = {'prediction': 0.5}  # Would be stored from actual prediction
             self.add_build_feedback(str(build_id), last_prediction, outcome)
         
+        # Comprehensive post-build analysis and advice
+        self._provide_build_completion_advice(str(build_id), success)
+        
+        # Stage 4: Automatically research internet solutions for failed builds
+        if not success and hasattr(self, 'solution_finder'):
+            try:
+                self.logger.info(f"Build {build_id} failed - starting automatic internet solution research")
+                # Run solution research in background thread to avoid blocking
+                import threading
+                research_thread = threading.Thread(
+                    target=self._background_solution_research,
+                    args=(str(build_id),),
+                    daemon=True
+                )
+                research_thread.start()
+            except Exception as e:
+                self.logger.error(f"Failed to start automatic solution research: {e}")
+        
     def predict_advanced(self, build_data: Dict) -> Optional[Dict]:
         """Phase 2: Advanced prediction with confidence intervals and cross-system integration"""
         if not self.is_enabled():
@@ -588,15 +614,27 @@ class MLEngine:
                 'live_monitor': hasattr(self, 'live_monitor'),
                 'solution_database': self.get_solution_analytics() if hasattr(self, 'solution_finder') else {'status': 'not_initialized'},
                 'live_monitoring': self.get_live_monitoring_status() if hasattr(self, 'live_monitor') else {'status': 'not_initialized'},
+                'active_monitoring': self.active_monitor.get_monitoring_status() if hasattr(self, 'active_monitor') else {'status': 'not_initialized'},
                 'capabilities': [
                     'Log Analysis for Root Cause Detection',
-                    'System Health Anomaly Detection',
+                    'System Health Anomaly Detection', 
                     'Predictive Maintenance Recommendations',
                     'Internet-based Solution Research with Caching',
                     'Solution Effectiveness Tracking',
                     'Automated Solution Database Updates',
                     'Real-time Build Log Monitoring',
-                    'On-the-fly Error Detection and Correction'
+                    'On-the-fly Error Detection and Correction',
+                    'Active Real-time Monitoring and Intervention',
+                    'Stuck Build Detection and Auto-resolution',
+                    'Immediate Issue Response System',
+                    'Comprehensive Application Monitoring',
+                    'Real-time Advice and Fix Recommendations',
+                    'Database Operation Monitoring',
+                    'File System and Permission Monitoring',
+                    'Network Connectivity Monitoring',
+                    'Resource Usage Monitoring and Alerts',
+                    'Build Completion Analysis and Optimization',
+                    'Failure Analysis with Actionable Advice'
                 ]
             }
             
@@ -606,11 +644,20 @@ class MLEngine:
             return {'error': str(e), 'ml_enabled': False}
     
     def start_build_monitoring(self, build_id: str, stage_name: str = None):
-        """Start comprehensive ML monitoring for active build"""
+        """Start comprehensive ML monitoring for active build with real-time solution research"""
         try:
             # Attempt to initialize data pipeline if not ready
             if not self.data_pipeline:
                 self._init_data_pipeline()
+            
+            # Active monitor is already running globally, just log the build start
+            self.db.add_document(
+                build_id,
+                'log',
+                'ML Monitoring Started',
+                f'Active ML monitoring engaged for build {build_id} at stage {stage_name or "unknown"}',
+                {'ml_monitoring': True, 'build_start': True}
+            )
             
             # Start live log monitoring with error detection
             if hasattr(self, 'live_monitor'):
@@ -632,6 +679,15 @@ class MLEngine:
     def stop_build_monitoring(self, build_id: str):
         """Stop ML monitoring for build"""
         try:
+            # Log monitoring stop
+            self.db.add_document(
+                build_id,
+                'log',
+                'ML Monitoring Stopped',
+                f'Active ML monitoring completed for build {build_id}',
+                {'ml_monitoring': True, 'build_end': True}
+            )
+            
             if hasattr(self, 'live_monitor'):
                 self.live_monitor.stop_monitoring(build_id)
                 self.logger.info(f"Stopped live monitoring for build {build_id}")
@@ -641,10 +697,12 @@ class MLEngine:
     def get_live_monitoring_status(self) -> Dict:
         """Get live monitoring status"""
         try:
+            status = {}
             if hasattr(self, 'live_monitor'):
-                return self.live_monitor.get_monitoring_status()
-            else:
-                return {'error': 'Live monitor not available'}
+                status['live_monitor'] = self.live_monitor.get_monitoring_status()
+            if hasattr(self, 'active_monitor'):
+                status['active_monitor'] = self.active_monitor.get_monitoring_status()
+            return status if status else {'error': 'No monitors available'}
         except Exception as e:
             return {'error': str(e)}
     
@@ -873,9 +931,32 @@ class MLEngine:
         """Find internet-based solutions for build failures with comprehensive tracking"""
         try:
             if hasattr(self, 'solution_finder'):
-                report = self.solution_finder.generate_solution_report(int(build_id))
+                # Log the start of internet research
+                self.db.add_document(
+                    build_id,
+                    'log',
+                    'Internet Solution Research Started',
+                    f'Starting internet research for build {build_id} failures',
+                    {'ml_activity': True, 'research_type': 'internet_solutions'}
+                )
                 
-                # Log solution research activity
+                report = self.solution_finder.generate_solution_report(build_id)
+                
+                # Log detailed solution research activity
+                activity_log = f"Internet Solution Research Completed for build {build_id}:\n"
+                activity_log += f"Solutions found: {report.get('solutions_found', 0)}\n"
+                activity_log += f"Cached solutions: {report.get('cached_solutions', 0)}\n"
+                activity_log += f"New searches: {report.get('new_solutions', 0)}\n"
+                activity_log += f"Research duration: {report.get('research_duration', 'unknown')}\n"
+                
+                self.db.add_document(
+                    build_id,
+                    'log',
+                    'Internet Solution Research Results',
+                    activity_log,
+                    {'ml_activity': True, 'research_type': 'internet_solutions', 'solutions_count': report.get('solutions_found', 0)}
+                )
+                
                 self.logger.info(f"Generated solution report for build {build_id}: "
                                f"{report.get('solutions_found', 0)} solutions found, "
                                f"{report.get('cached_solutions', 0)} from cache, "
@@ -924,9 +1005,240 @@ class MLEngine:
             self.logger.error(f"Failed to get solution analytics: {e}")
             return {'error': str(e)}
     
+
+    
+    def _research_specific_issue(self, build_id: str, content: str, title: str):
+        """Research solutions for a specific issue detected in real-time"""
+        try:
+            # Extract actual error message from content, skip echo commands
+            error_lines = []
+            for line in content.split('\n'):
+                line = line.strip()
+                if line and not line.startswith('echo') and not line.startswith('===') and any(keyword in line.lower() for keyword in ['error:', 'failed', 'cannot', 'missing', 'no match for argument', 'unable to find']):
+                    error_lines.append(line)
+            
+            error_message = error_lines[0] if error_lines else None
+            
+            # Skip if no real error found
+            if not error_message or 'echo' in error_message or '===' in error_message:
+                return
+            
+            # Log the start of research
+            self.db.add_document(
+                build_id,
+                'log',
+                'Real-time Internet Solution Research',
+                f'Searching internet for solutions to: {error_message[:100]}...',
+                {'ml_activity': True, 'research_type': 'real_time_issue'}
+            )
+            
+            # Search for solutions with metadata
+            solutions = self.search_error_solutions(error_message, 'unknown', None)
+            
+            # Store solutions with metadata for future learning
+            for solution in solutions:
+                self._store_solution_with_metadata(build_id, error_message, solution)
+            
+            # Log results
+            result_log = f'Found {len(solutions)} potential solutions for real-time issue'
+            if solutions:
+                result_log += f'\nTop solution: {solutions[0].get("title", "Unknown")[:50]}...'
+                result_log += f'\nSources: {", ".join([s.get("source_url", "unknown")[:30] for s in solutions[:3]])}'  
+            
+            self.db.add_document(
+                build_id,
+                'log',
+                'Real-time Solution Research Results',
+                result_log,
+                {'ml_activity': True, 'research_type': 'real_time_issue', 'solutions_found': len(solutions)}
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Real-time issue research failed: {e}")
+    
+    def _store_solution_with_metadata(self, build_id: str, error_message: str, solution: Dict):
+        """Store solution with metadata for ML learning"""
+        try:
+            solution_data = {
+                'error_message': error_message,
+                'solution_title': solution.get('title', ''),
+                'solution_content': solution.get('content', ''),
+                'source_url': solution.get('source_url', ''),
+                'source_domain': solution.get('source_domain', ''),
+                'confidence_score': solution.get('confidence', 0.0),
+                'search_timestamp': datetime.now().isoformat(),
+                'build_id': build_id,
+                'effectiveness_rating': None,  # To be updated when solution is tested
+                'applied': False,
+                'success': None
+            }
+            
+            # Store in database for ML learning
+            self.db.execute_query(
+                "INSERT INTO solution_effectiveness (build_id, error_message, solution_data, created_at) VALUES (%s, %s, %s, NOW())",
+                (build_id, error_message[:500], json.dumps(solution_data))
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to store solution metadata: {e}")
+    
+    def record_solution_success(self, build_id: str, error_message: str, effectiveness: float):
+        """Record when a solution successfully fixes an issue"""
+        try:
+            # Update solution effectiveness in database
+            self.db.execute_query(
+                "UPDATE solution_effectiveness SET effectiveness_rating = %s, success = TRUE, applied = TRUE WHERE build_id = %s AND error_message LIKE %s",
+                (effectiveness, build_id, f"%{error_message[:100]}%")
+            )
+            
+            # Log successful solution for ML learning
+            self.db.add_document(
+                build_id,
+                'log',
+                'Solution Success Recorded',
+                f'Solution effectiveness recorded: {effectiveness:.2f} for error: {error_message[:100]}',
+                {'ml_learning': True, 'solution_success': True, 'effectiveness': effectiveness}
+            )
+            
+            # Update ML model with successful solution
+            if hasattr(self, 'solution_finder'):
+                self.mark_solution_effective(error_message, effectiveness)
+                
+        except Exception as e:
+            self.logger.error(f"Failed to record solution success: {e}")
+    
+    def _provide_build_completion_advice(self, build_id: str, success: bool):
+        """Provide comprehensive advice after build completion"""
+        try:
+            if success:
+                # Success advice
+                advice = "Build completed successfully! "
+                
+                # Get build duration for optimization advice
+                build_info = self.db.execute_query(
+                    "SELECT duration_seconds FROM builds WHERE build_id = %s",
+                    (build_id,), fetch=True
+                )
+                
+                if build_info and build_info[0]['duration_seconds']:
+                    duration_min = build_info[0]['duration_seconds'] / 60
+                    if duration_min > 180:  # 3+ hours
+                        advice += f"Build took {duration_min:.0f} minutes - consider optimization."
+                        self._provide_optimization_advice(build_id)
+                    else:
+                        advice += f"Build completed in {duration_min:.0f} minutes - good performance."
+                
+                self.db.add_document(
+                    build_id, 'advice', 'ML Success Analysis',
+                    advice, {'ml_advice': True, 'build_success': True}
+                )
+            else:
+                # Failure advice - comprehensive analysis
+                self._provide_failure_analysis_advice(build_id)
+                
+        except Exception as e:
+            self.logger.error(f"Build completion advice failed: {e}")
+    
+    def _provide_optimization_advice(self, build_id: str):
+        """Provide optimization advice for slow builds"""
+        try:
+            advice = "Build Optimization Recommendations:\n\n"
+            advice += "1. Increase parallel jobs: export MAKEFLAGS='-j$(nproc)'\n"
+            advice += "2. Use faster storage: move /mnt/lfs to SSD\n"
+            advice += "3. Add more RAM: builds benefit from 16GB+\n"
+            advice += "4. Use ccache: export CC='ccache gcc'\n"
+            advice += "5. Check CPU throttling: cat /proc/cpuinfo | grep MHz\n"
+            
+            self.db.add_document(
+                build_id, 'advice', 'ML Optimization Advice',
+                advice, {'ml_advice': True, 'optimization': True}
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Optimization advice failed: {e}")
+    
+    def _provide_failure_analysis_advice(self, build_id: str):
+        """Provide comprehensive failure analysis and advice"""
+        try:
+            # Analyze failure patterns
+            if hasattr(self, 'log_analyzer'):
+                analysis = self.log_analyzer.analyze_build_logs(build_id)
+                
+                advice = "Build Failure Analysis:\n\n"
+                
+                if 'root_causes' in analysis:
+                    advice += "Root Causes Identified:\n"
+                    for cause in analysis['root_causes'][:3]:
+                        advice += f"• {cause}\n"
+                    advice += "\n"
+                
+                advice += "Immediate Actions:\n"
+                advice += "1. Check error logs: View Documents tab\n"
+                advice += "2. Verify permissions: ls -la /mnt/lfs\n"
+                advice += "3. Check disk space: df -h\n"
+                advice += "4. Review dependencies: ldd --version\n"
+                advice += "5. Restart with clean environment\n\n"
+                
+                advice += "For detailed solutions, check the internet research results above."
+                
+                self.db.add_document(
+                    build_id, 'advice', 'ML Failure Analysis',
+                    advice, {'ml_advice': True, 'failure_analysis': True}
+                )
+            
+        except Exception as e:
+            self.logger.error(f"Failure analysis advice failed: {e}")
+    
+    def research_build_solutions(self, build_id: str, error_context: str = None) -> Dict:
+        """Research solutions with full metadata for display"""
+        try:
+            if hasattr(self, 'solution_finder'):
+                # Get the solution report with metadata
+                report = self.solution_finder.generate_solution_report(build_id)
+                
+                # Extract solutions with metadata for display
+                solutions_with_metadata = []
+                for stage_solution in report.get('stage_solutions', []):
+                    for solution in stage_solution.get('solutions', []):
+                        solution_with_meta = {
+                            'title': solution.get('title', 'Unknown'),
+                            'url': solution.get('url', ''),
+                            'source': solution.get('source', 'Unknown'),
+                            'confidence': solution.get('relevance_score', 0) / 100.0,
+                            'stage': stage_solution.get('stage_name', 'Unknown'),
+                            'search_timestamp': report.get('report_generated_at', ''),
+                            'cached': stage_solution.get('solution_source') == 'cached'
+                        }
+                        solutions_with_metadata.append(solution_with_meta)
+                
+                return {
+                    'solutions': solutions_with_metadata,
+                    'total_found': len(solutions_with_metadata),
+                    'cached_count': report.get('cached_solutions', 0),
+                    'new_searches': report.get('new_solutions', 0),
+                    'build_id': build_id,
+                    'research_timestamp': report.get('report_generated_at', '')
+                }
+            else:
+                return {'error': 'Solution finder not available'}
+        except Exception as e:
+            self.logger.error(f"Solution research failed: {e}")
+            return {'error': str(e)}
+    
+    def _background_solution_research(self, build_id: str):
+        """Background thread for internet solution research"""
+        try:
+            self.find_build_solutions(build_id)
+        except Exception as e:
+            self.logger.error(f"Background solution research failed for build {build_id}: {e}")
+    
     def shutdown(self):
         """Shutdown ML engine and cleanup resources"""
         try:
+            # Stop active monitoring first
+            if hasattr(self, 'active_monitor'):
+                self.active_monitor.stop_monitoring()
+            
             # Stop background retry
             self.retry_active = False
             

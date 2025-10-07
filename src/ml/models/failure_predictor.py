@@ -164,11 +164,13 @@ class FailurePredictor:
             
             for build in builds:
                 duration = build.get("duration_seconds", 0)
-                if duration > 0:
+                if duration and duration > 0:
+                    # Convert decimal to float safely
+                    duration_float = float(duration)
                     if build["status"] == "success":
-                        successful_durations.append(duration)
+                        successful_durations.append(duration_float)
                     elif build["status"] == "failed":
-                        failed_durations.append(duration)
+                        failed_durations.append(duration_float)
             
             # Calculate timing thresholds
             if successful_durations and failed_durations:
@@ -394,7 +396,9 @@ class FailurePredictor:
         sum_x2 = sum(xi * xi for xi in x)
         sum_y2 = sum(yi * yi for yi in y)
         
-        denominator = ((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)) ** 0.5
+        import math
+        denominator_value = (n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)
+        denominator = math.sqrt(float(denominator_value))
         
         if denominator == 0:
             return 0.0
@@ -458,6 +462,10 @@ class FailurePredictor:
     def predict_batch(self, batch_data: List[Dict]) -> List[Optional[Dict]]:
         """Predict failure risk for batch of build data"""
         return [self.predict(data) for data in batch_data]
+    
+    def train_model(self) -> Dict:
+        """Train the failure prediction model - interface method for automated training"""
+        return self.train()
     
     def train(self) -> Dict:
         """Train the failure prediction model"""

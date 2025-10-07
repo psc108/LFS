@@ -219,21 +219,45 @@ class BuildReportDialog(QDialog):
         return tab
     
     def load_report(self):
-        """Load build analysis and recommendations"""
+        """Load build analysis and recommendations using database and ML"""
         try:
             from ..analysis.build_advisor import BuildAdvisor
             advisor = BuildAdvisor(self.db)
             
-            if self.build_id:
-                # Generate specific build report
-                self.report_data = advisor.generate_build_report(self.build_id)
-            else:
-                # Generate general analysis
-                analysis = advisor.analyze_build_history()
-                self.report_data = {
-                    'analysis': analysis,
-                    'generated_at': datetime.now().isoformat()
-                }
+            # Get comprehensive analysis with ML insights
+            analysis = advisor.generate_build_advice(self.build_id)
+            
+            # Get actual build data from database
+            builds = self.db.execute_query(
+                "SELECT * FROM builds ORDER BY start_time DESC LIMIT 50",
+                fetch=True
+            ) or []
+            
+            # Get failure analysis from database
+            failures = self.db.execute_query(
+                "SELECT stage_name, COUNT(*) as failure_count, GROUP_CONCAT(output_log) as errors FROM build_stages WHERE status = 'failed' GROUP BY stage_name ORDER BY failure_count DESC",
+                fetch=True
+            ) or []
+            
+            # Get ML insights if available
+            ml_insights = None
+            try:
+                from ..ml.ml_engine import MLEngine
+                ml_engine = MLEngine(self.db)
+                if ml_engine.is_enabled():
+                    ml_insights = ml_engine.get_system_wide_insights()
+            except:
+                pass
+            
+            self.report_data = {
+                'analysis': analysis.get('analysis', {}),
+                'builds': builds,
+                'failures': failures,
+                'ml_insights': ml_insights,
+                'recommendations': analysis.get('recommendations', []),
+                'next_build_advice': analysis.get('next_build_advice', []),
+                'generated_at': datetime.now().isoformat()
+            }
             
             self.populate_ui()
             
@@ -262,19 +286,34 @@ class BuildReportDialog(QDialog):
         self.populate_next_build_advice(analysis)
     
     def populate_overview(self, analysis):
-        """Populate overview tab"""
-        # Summary text
-        summary = f"""Build Analysis Summary
+        """Populate overview tab with actual database data"""
+        builds = self.report_data.get('builds', [])
+        ml_insights = self.report_data.get('ml_insights', {})
+        
+        total = len(builds)
+        successful = len([b for b in builds if b.get('status') == 'success'])
+        failed = len([b for b in builds if b.get('status') == 'failed'])
+        cancelled = len([b for b in builds if b.get('status') == 'cancelled'])
+        success_rate = (successful / total * 100) if total > 0 else 0
+        
+        # Add ML insights to summary
+        ml_status = "ML Analysis: Enabled" if ml_insights else "ML Analysis: Not Available"
+        failure_risk = ""
+        if ml_insights and ml_insights.get('insights', {}).get('failure_prediction'):
+            risk = ml_insights['insights']['failure_prediction'].get('risk_score', 0) * 100
+            failure_risk = f"\nNext Build Failure Risk: {risk:.1f}%"
+        
+        summary = f"""Build Analysis Summary (Database-Driven)
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{ml_status}{failure_risk}
 
-Total Builds: {analysis.get('total_builds', 0)}
-Successful: {analysis.get('successful_builds', 0)}
-Failed: {analysis.get('failed_builds', 0)}
-Cancelled: {analysis.get('cancelled_builds', 0)}
-Success Rate: {analysis.get('success_rate', 0)}%
+Total Builds: {total}
+Successful: {successful}
+Failed: {failed}
+Cancelled: {cancelled}
+Success Rate: {success_rate:.1f}%
 
-This analysis is based on the last 30 days of build history and provides
-recommendations to improve your next build success rate."""
+Analysis based on actual build history from database with ML insights."""
         
         self.summary_text.setPlainText(summary)
         
@@ -307,18 +346,20 @@ recommendations to improve your next build success rate."""
             self.metrics_table.setItem(i, 1, value_item)
     
     def populate_analysis(self, analysis):
-        """Populate analysis tab"""
-        # Common failures
-        failures = analysis.get('common_failures', [])
+        """Populate analysis tab with actual database failure data"""
+        # Use actual failure data from database
+        failures = self.report_data.get('failures', [])
         self.failures_table.setRowCount(len(failures))
         
         for i, failure in enumerate(failures):
-            self.failures_table.setItem(i, 0, QTableWidgetItem(failure.get('stage', 'Unknown')))
+            self.failures_table.setItem(i, 0, QTableWidgetItem(failure.get('stage_name', 'Unknown')))
             self.failures_table.setItem(i, 1, QTableWidgetItem(str(failure.get('failure_count', 0))))
             
-            errors = failure.get('common_errors', [])
-            error_text = '; '.join(errors[:2]) if errors else 'No error details'
-            self.failures_table.setItem(i, 2, QTableWidgetItem(error_text))
+            errors = failure.get('errors', '') or 'No error details'
+            # Truncate long error messages
+            if len(errors) > 100:
+                errors = errors[:100] + '...'
+            self.failures_table.setItem(i, 2, QTableWidgetItem(errors))
         
         # Build stages (if specific build)
         if 'stages' in self.report_data:
@@ -344,8 +385,22 @@ recommendations to improve your next build success rate."""
                 self.stages_table.setItem(i, 3, QTableWidgetItem(issues))
     
     def populate_recommendations(self, analysis):
-        """Populate recommendations tab"""
-        recommendations = analysis.get('recommendations', [])
+        """Populate recommendations tab with ML-driven recommendations"""
+        recommendations = self.report_data.get('recommendations', [])
+        
+        # Add ML recommendations if available
+        ml_insights = self.report_data.get('ml_insights', {})
+        if ml_insights and ml_insights.get('insights'):
+            for insight_type, insight_data in ml_insights['insights'].items():
+                if insight_data.get('recommendations'):
+                    for rec in insight_data['recommendations']:
+                        recommendations.append({
+                            'priority': 'High',
+                            'category': f'ML-{insight_type}',
+                            'issue': f'ML detected {insight_type} issue',
+                            'recommendation': rec
+                        })
+        
         self.recommendations_table.setRowCount(len(recommendations))
         
         for i, rec in enumerate(recommendations):
@@ -483,42 +538,84 @@ Following this checklist significantly improves build success rates!"""
             QMessageBox.critical(self, "Print Error", f"Failed to print report: {str(e)}")
     
     def generate_text_report(self):
-        """Generate text version of report"""
+        """Generate text version of report with actual data"""
         if not self.report_data:
             return "No report data available"
         
         analysis = self.report_data.get('analysis', {})
         
-        report = f"""
-LFS BUILD ANALYSIS REPORT
+        # Get actual build data from database
+        try:
+            builds = self.db.execute_query(
+                "SELECT build_id, status, start_time, duration_seconds FROM builds ORDER BY start_time DESC LIMIT 10",
+                fetch=True
+            ) or []
+            
+            total_builds = len(builds)
+            successful = len([b for b in builds if b.get('status') == 'success'])
+            failed = len([b for b in builds if b.get('status') == 'failed'])
+            success_rate = (successful / total_builds * 100) if total_builds > 0 else 0
+            
+        except Exception:
+            builds = []
+            total_builds = analysis.get('total_builds', 0)
+            successful = analysis.get('successful_builds', 0)
+            failed = analysis.get('failed_builds', 0)
+            success_rate = analysis.get('success_rate', 0)
+        
+        report = f"""LFS BUILD ANALYSIS REPORT
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {'='*50}
 
 OVERVIEW
 --------
-Total Builds: {analysis.get('total_builds', 0)}
-Successful Builds: {analysis.get('successful_builds', 0)}
-Failed Builds: {analysis.get('failed_builds', 0)}
-Success Rate: {analysis.get('success_rate', 0)}%
+Total Builds: {total_builds}
+Successful Builds: {successful}
+Failed Builds: {failed}
+Success Rate: {success_rate:.1f}%
 
-COMMON FAILURE PATTERNS
------------------------
+RECENT BUILDS
+-------------
 """
         
-        for failure in analysis.get('common_failures', []):
-            report += f"• {failure.get('stage', 'Unknown')}: {failure.get('failure_count', 0)} failures\\n"
+        if builds:
+            for build in builds[:5]:
+                status_icon = "✅" if build.get('status') == 'success' else "❌" if build.get('status') == 'failed' else "⏸️"
+                duration = f"{build.get('duration_seconds', 0)//60}min" if build.get('duration_seconds') else "N/A"
+                report += f"{status_icon} {build.get('build_id', 'Unknown')} - {build.get('status', 'unknown')} ({duration})\n"
+        else:
+            report += "No recent builds found\n"
         
-        report += "\\nRECOMMENDATIONS\\n"
-        report += "---------------\\n"
+        report += "\nCOMMON FAILURE PATTERNS\n-----------------------\n"
         
-        for rec in analysis.get('recommendations', []):
-            report += f"• [{rec.get('priority', 'Medium')}] {rec.get('issue', 'No issue')}\\n"
-            report += f"  Action: {rec.get('recommendation', 'No recommendation')}\\n\\n"
+        failures = analysis.get('common_failures', [])
+        if failures:
+            for failure in failures:
+                report += f"• {failure.get('stage', 'Unknown')}: {failure.get('failure_count', 0)} failures\n"
+                for error in failure.get('common_errors', [])[:2]:
+                    report += f"  - {error}\n"
+        else:
+            report += "No failure patterns detected\n"
         
-        report += "NEXT BUILD ADVICE\\n"
-        report += "-----------------\\n"
+        report += "\nRECOMMENDATIONS\n---------------\n"
         
-        for advice in analysis.get('next_build_advice', []):
-            report += f"• {advice.get('action', 'No action')} ({advice.get('estimated_time', 'Unknown time')})\\n"
+        recommendations = analysis.get('recommendations', [])
+        if recommendations:
+            for rec in recommendations:
+                report += f"• [{rec.get('priority', 'Medium')}] {rec.get('issue', 'No issue')}\n"
+                report += f"  Action: {rec.get('recommendation', 'No recommendation')}\n\n"
+        else:
+            report += "No specific recommendations - build performance is good\n"
+        
+        report += "NEXT BUILD ADVICE\n-----------------\n"
+        
+        advice_list = analysis.get('next_build_advice', [])
+        if advice_list:
+            for advice in advice_list:
+                report += f"• {advice.get('action', 'No action')} ({advice.get('estimated_time', 'Unknown time')})\n"
+        else:
+            report += "• Run system compliance check before next build\n"
+            report += "• Ensure adequate disk space (15+ GB)\n"
+            report += "• Verify network connectivity for downloads\n"
         
         return report

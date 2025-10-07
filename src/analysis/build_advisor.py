@@ -47,9 +47,12 @@ class BuildAdvisor:
             successful_durations = []
             for b in builds:
                 if b['status'] == 'success' and b['duration_seconds']:
-                    # Convert decimal.Decimal to float
-                    duration = float(b['duration_seconds']) if b['duration_seconds'] else 0
-                    successful_durations.append(duration)
+                    # Convert decimal.Decimal to float safely
+                    try:
+                        duration = float(b['duration_seconds'])
+                        successful_durations.append(duration)
+                    except (TypeError, ValueError):
+                        pass
             
             if successful_durations:
                 analysis['avg_duration_minutes'] = sum(successful_durations) / len(successful_durations) / 60
@@ -82,7 +85,7 @@ class BuildAdvisor:
             for build in failed_builds:
                 # Get failed stages for this build
                 failed_stages = self.db.execute_query("""
-                    SELECT stage_name, error_message, stage_order
+                    SELECT stage_name, output_log as error_message, stage_order
                     FROM build_stages 
                     WHERE build_id = %s AND status = 'failed'
                     ORDER BY stage_order
@@ -179,7 +182,7 @@ class BuildAdvisor:
             if last_build['status'] == 'failed':
                 # Get the failed stage
                 failed_stage = self.db.execute_query("""
-                    SELECT stage_name, error_message, stage_order
+                    SELECT stage_name, output_log as error_message, stage_order
                     FROM build_stages 
                     WHERE build_id = %s AND status = 'failed'
                     ORDER BY stage_order DESC
@@ -343,11 +346,11 @@ class BuildAdvisor:
                 """
                 
                 cursor.execute(insert_query, (
-                    build_id,
+                    build_id if build_id and str(build_id).isdigit() else None,
                     title,
                     advice.get('analysis', {}).get('total_builds', 0),
                     success_rate,
-                    float(advice.get('analysis', {}).get('avg_duration_minutes', 0) or 0),
+                    float(advice.get('analysis', {}).get('avg_duration_minutes') or 0),
                     full_output,
                     json.dumps(advice.get('failure_patterns', [])),
                     json.dumps(advice.get('recommendations', [])),
@@ -368,6 +371,28 @@ class BuildAdvisor:
         lines.append("=" * 80)
         lines.append(f"Generated: {advice.get('timestamp', 'Unknown')}")
         lines.append(f"Build Context: {advice.get('build_context', 'All Builds')}")
+        lines.append("")
+        
+        # ML Training Status
+        ml_status = self._get_ml_training_status()
+        lines.append("ML TRAINING STATUS")
+        lines.append("-" * 40)
+        if ml_status.get('ml_enabled'):
+            lines.append(f"ML Engine: {ml_status.get('status', 'Unknown')}")
+            lines.append(f"Models Trained: {ml_status.get('trained_models', 0)}")
+            lines.append(f"Last Training: {ml_status.get('last_training', 'Never')}")
+            lines.append(f"Training Accuracy: {ml_status.get('avg_accuracy', 'N/A')}")
+            
+            # Recent training activity
+            recent_training = ml_status.get('recent_training', [])
+            if recent_training:
+                lines.append("Recent Training Activity:")
+                for training in recent_training[:3]:
+                    lines.append(f"  - {training.get('model', 'Unknown')}: {training.get('accuracy', 'N/A')} accuracy")
+            else:
+                lines.append("No recent training activity detected")
+        else:
+            lines.append("ML Engine: Disabled or not available")
         lines.append("")
         
         # Analysis Summary
@@ -433,6 +458,25 @@ class BuildAdvisor:
             lines.append("No specific next build advice available.")
             lines.append("")
         
+        # ML Insights Section
+        ml_insights = self._get_ml_insights_for_report(advice.get('build_context'))
+        lines.append("ML INSIGHTS & PREDICTIONS")
+        lines.append("-" * 40)
+        if ml_insights.get('available'):
+            lines.append(f"Failure Risk Prediction: {ml_insights.get('failure_risk', 'N/A')}")
+            lines.append(f"Performance Optimization: {ml_insights.get('performance_score', 'N/A')}")
+            lines.append(f"Anomaly Detection: {ml_insights.get('anomaly_status', 'Normal')}")
+            
+            # ML Recommendations
+            ml_recommendations = ml_insights.get('recommendations', [])
+            if ml_recommendations:
+                lines.append("ML-Generated Recommendations:")
+                for rec in ml_recommendations[:5]:
+                    lines.append(f"  - {rec}")
+        else:
+            lines.append("ML insights not available for this analysis")
+        lines.append("")
+        
         lines.append("=" * 80)
         lines.append("END OF REPORT")
         lines.append("=" * 80)
@@ -493,11 +537,153 @@ class BuildAdvisor:
         """Log report access for analytics"""
         try:
             self.db.execute_query("""
-                INSERT INTO report_access_log (report_id, access_type, access_time)
+                INSERT INTO report_access_log (report_id, access_type, created_at)
                 VALUES (%s, %s, NOW())
             """, (report_id, access_type))
         except Exception as e:
             print(f"Failed to log report access: {e}")
+    
+    def _get_ml_training_status(self) -> Dict:
+        """Get ML training status for reporting"""
+        try:
+            from ml.ml_engine import MLEngine
+            ml_engine = MLEngine(self.db)
+            
+            if not ml_engine.is_enabled():
+                return {'ml_enabled': False, 'status': 'Disabled'}
+            
+            # Get model status
+            model_status = ml_engine.get_model_status()
+            
+            # Get training results
+            training_results = ml_engine.train_models()
+            
+            # Calculate statistics
+            trained_models = len([m for m in model_status.get('models', {}).values() if m.get('trained', False)])
+            
+            # Get recent training activity
+            recent_training = training_results.get('trained_models', [])
+            
+            # Calculate average accuracy
+            accuracies = [t.get('accuracy') for t in recent_training if t.get('accuracy') is not None]
+            avg_accuracy = f"{sum(accuracies) / len(accuracies):.2f}" if accuracies else "N/A"
+            
+            return {
+                'ml_enabled': True,
+                'status': 'Active',
+                'trained_models': trained_models,
+                'last_training': datetime.now().strftime('%Y-%m-%d %H:%M') if recent_training else 'Never',
+                'avg_accuracy': avg_accuracy,
+                'recent_training': recent_training,
+                'total_models': len(model_status.get('models', {}))
+            }
+            
+        except Exception as e:
+            return {'ml_enabled': False, 'status': f'Error: {str(e)}'}
+    
+    def _get_ml_insights_for_report(self, build_id: Optional[int] = None) -> Dict:
+        """Get ML insights for report generation"""
+        try:
+            from ml.ml_engine import MLEngine
+            ml_engine = MLEngine(self.db)
+            
+            if not ml_engine.is_enabled():
+                return {'available': False}
+            
+            # Get ML insights for the build or general insights
+            if build_id:
+                insights = ml_engine.get_ml_insights(str(build_id))
+            else:
+                insights = ml_engine.get_system_wide_insights()
+            
+            if not insights or 'error' in insights:
+                return {'available': False}
+            
+            # Extract key information
+            result = {'available': True}
+            
+            # Failure risk
+            failure_pred = insights.get('insights', {}).get('failure_prediction', {})
+            if failure_pred:
+                risk_score = failure_pred.get('risk_score', 0) * 100
+                result['failure_risk'] = f"{risk_score:.1f}% risk"
+            
+            # Performance optimization
+            perf_opt = insights.get('insights', {}).get('performance_optimization', {})
+            if perf_opt:
+                improvement = perf_opt.get('expected_improvement', 0)
+                result['performance_score'] = f"{improvement:.1f}% improvement potential"
+            
+            # Anomaly detection
+            anomaly_det = insights.get('insights', {}).get('anomaly_detection', {})
+            if anomaly_det:
+                severity = anomaly_det.get('severity', 'normal')
+                result['anomaly_status'] = severity.title()
+            
+            # Collect recommendations
+            recommendations = []
+            if failure_pred.get('recommendations'):
+                recommendations.extend(failure_pred['recommendations'])
+            if perf_opt.get('changes'):
+                for change in perf_opt['changes']:
+                    if isinstance(change, dict) and 'description' in change:
+                        recommendations.append(change['description'])
+                    elif isinstance(change, str):
+                        recommendations.append(change)
+            
+            result['recommendations'] = recommendations
+            
+            return result
+            
+        except Exception as e:
+            return {'available': False, 'error': str(e)}
+    
+    def generate_build_report(self, build_id: str) -> Dict:
+        """Generate a comprehensive build report"""
+        try:
+            # Get build details
+            build_info = self.db.execute_query(
+                "SELECT * FROM builds WHERE build_id = %s",
+                (build_id,), fetch=True
+            )
+            
+            if not build_info:
+                return {'error': f'Build {build_id} not found'}
+            
+            build = build_info[0]
+            
+            # Get build stages
+            stages = self.db.execute_query(
+                "SELECT * FROM build_stages WHERE build_id = %s ORDER BY stage_order",
+                (build_id,), fetch=True
+            )
+            
+            # Get build documents
+            documents = self.db.execute_query(
+                "SELECT * FROM build_documents WHERE build_id = %s ORDER BY created_at",
+                (build_id,), fetch=True
+            )
+            
+            # Generate report
+            report = {
+                'build_id': build_id,
+                'build_info': build,
+                'stages': stages or [],
+                'documents': documents or [],
+                'summary': {
+                    'status': build.get('status', 'unknown'),
+                    'total_stages': len(stages) if stages else 0,
+                    'completed_stages': len([s for s in (stages or []) if s.get('status') == 'completed']),
+                    'failed_stages': len([s for s in (stages or []) if s.get('status') == 'failed']),
+                    'duration': build.get('duration_seconds', 0)
+                },
+                'generated_at': datetime.now().isoformat()
+            }
+            
+            return report
+            
+        except Exception as e:
+            return {'error': f'Failed to generate report: {str(e)}'}
     
     def analyze_build_with_ml(self, build_id: int) -> Optional[Dict]:
         """Analyze build using ML engine integration"""

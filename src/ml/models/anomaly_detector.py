@@ -330,6 +330,10 @@ class AnomalyDetector:
             self.logger.error(f"Real-time anomaly check failed: {e}")
             return False
     
+    def train_model(self) -> Dict:
+        """Train the anomaly detector - interface method for automated training"""
+        return self.train()
+    
     def train(self) -> Dict:
         """Train the anomaly detector"""
         try:
